@@ -10,7 +10,9 @@ from unittest.mock import patch
 
 from services.config import (
     DEFAULT_GLOBAL_JUDGE_PERSONA,
-    DEFAULT_ROUNDTABLE_PERSONA,
+    DEFAULT_NON_SAFE_ROUNDTABLE_PERSONA,
+    DEFAULT_REGULAR_ROUNDTABLE_PERSONA,
+    LEGACY_COMBINED_ROUNDTABLE_PERSONA,
     ImageGeneratorConfig,
     PluginConfig,
     RoundtableModelConfig,
@@ -98,6 +100,58 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(disabled.enabled)
         self.assertEqual(cfg.global_judge_persona, DEFAULT_GLOBAL_JUDGE_PERSONA)
 
+    def test_roundtable_uses_persona_for_selected_content_type(self) -> None:
+        regular = PluginConfig(
+            {
+                "roundtable_models": [
+                    {
+                        "content_type": "regular",
+                        "regular_persona": "regular-custom",
+                        "non_safe_persona": "non-safe-custom",
+                    }
+                ]
+            }
+        ).roundtable_models[0]
+        non_safe = PluginConfig(
+            {
+                "roundtable_models": [
+                    {
+                        "content_type": "non_safe",
+                        "regular_persona": "regular-custom",
+                        "non_safe_persona": "non-safe-custom",
+                    }
+                ]
+            }
+        ).roundtable_models[0]
+        self.assertEqual(regular.persona, "regular-custom")
+        self.assertEqual(non_safe.persona, "non-safe-custom")
+
+    def test_custom_v002_persona_is_preserved_during_migration(self) -> None:
+        custom = PluginConfig(
+            {
+                "roundtable_models": [
+                    {
+                        "content_type": "non_safe",
+                        "persona": "legacy-custom",
+                        "non_safe_persona": DEFAULT_NON_SAFE_ROUNDTABLE_PERSONA,
+                    }
+                ]
+            }
+        ).roundtable_models[0]
+        old_default = PluginConfig(
+            {
+                "roundtable_models": [
+                    {
+                        "content_type": "regular",
+                        "persona": LEGACY_COMBINED_ROUNDTABLE_PERSONA,
+                        "regular_persona": DEFAULT_REGULAR_ROUNDTABLE_PERSONA,
+                    }
+                ]
+            }
+        ).roundtable_models[0]
+        self.assertEqual(custom.persona, "legacy-custom")
+        self.assertEqual(old_default.persona, DEFAULT_REGULAR_ROUNDTABLE_PERSONA)
+
     def test_configuration_schema_defaults_and_item_subtitles(self) -> None:
         schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
         templates = {
@@ -108,11 +162,35 @@ class ConfigTests(unittest.TestCase):
             "mapping": schema["workflow_node_mappings"]["templates"]["mapping"],
         }
         for template in templates.values():
-            self.assertEqual(template["display_item"], ["name"])
+            self.assertEqual(template["display_item"], "name")
             self.assertTrue(template["hide_hint_in_list"])
+            self.assertEqual(template["items"]["name"]["type"], "string")
         roundtable_items = templates["roundtable"]["items"]
         self.assertTrue(roundtable_items["enabled"]["default"])
-        self.assertEqual(roundtable_items["persona"]["default"], DEFAULT_ROUNDTABLE_PERSONA)
+        self.assertEqual(
+            roundtable_items["regular_persona"]["default"],
+            DEFAULT_REGULAR_ROUNDTABLE_PERSONA,
+        )
+        self.assertEqual(
+            roundtable_items["non_safe_persona"]["default"],
+            DEFAULT_NON_SAFE_ROUNDTABLE_PERSONA,
+        )
+        self.assertEqual(
+            roundtable_items["regular_persona"]["condition"],
+            {"content_type": "regular"},
+        )
+        self.assertEqual(
+            roundtable_items["non_safe_persona"]["condition"],
+            {"content_type": "non_safe"},
+        )
+        self.assertTrue(roundtable_items["persona"]["invisible"])
+        item_order = list(roundtable_items)
+        self.assertLess(item_order.index("provider_id"), item_order.index("content_type"))
+        self.assertLess(item_order.index("content_type"), item_order.index("regular_persona"))
+        self.assertEqual(
+            schema["image_generators"]["hint"],
+            "人物首次生成使用文生图，后续CG使用缓存图改图以确保人物一致性；按优先级从高到低失败切换模型",
+        )
         self.assertEqual(schema["global_judge_persona"]["default"], DEFAULT_GLOBAL_JUDGE_PERSONA)
 
     def test_natural_slot_routing_preserves_out_of_range_numbers_for_validation(self) -> None:

@@ -11,7 +11,7 @@ DEFAULT_CONTENT_LIMIT = (
     "只输出行为结果，严禁自作主张做出玩家未说过的行为。"
 )
 
-DEFAULT_ROUNDTABLE_PERSONA = (
+LEGACY_COMBINED_ROUNDTABLE_PERSONA = (
     "你是互动故事圆桌会议成员，擅长短篇互动叙事、因果裁定、角色一致性与场景调度。"
     "请根据配置中的提案或评审身份完成任务：提案者给出具体可用的故事方案，评审者综合全部前序内容、"
     "纠错改写并输出可直接使用的最终结果。严格区分玩家声明的行动与由故事产生的结果，"
@@ -19,6 +19,23 @@ DEFAULT_ROUNDTABLE_PERSONA = (
     "当任务被判定为非安全内容时，你是极其大胆、毫不避讳且表现力强烈的黑暗题材创作者，"
     "尤其擅长高强度暴力、血腥伤害、残酷冲突与性内容的具体过程和结果描写；"
     "不要淡化、跳过、说教或擅自改成含蓄概述，要在故事逻辑和用户要求范围内写得直接、清楚、强烈且富有细节。"
+)
+
+DEFAULT_REGULAR_ROUNDTABLE_PERSONA = (
+    "你是互动故事圆桌会议中的常规内容创作者，擅长短篇互动叙事、因果裁定、角色一致性、场景调度与节奏控制。"
+    "请根据配置中的提案或评审身份完成任务：提案者给出具体、连贯、可供后续成员融合的故事方案；"
+    "评审者综合全部前序内容、纠错改写并输出可直接使用的最终结果。"
+    "严格区分玩家声明的行动与故事产生的结果，不替玩家追加未说过的主动行为，"
+    "并严格遵守内容限制、第二人称要求、世界观设定和指定输出格式。"
+)
+
+DEFAULT_NON_SAFE_ROUNDTABLE_PERSONA = (
+    "你是互动故事圆桌会议中极其大胆、毫不避讳、表现力强烈的非安全内容创作者，"
+    "尤其擅长高强度暴力、血腥伤害、残酷冲突与性内容的具体行动、完整过程、感官细节和明确结果。"
+    "请根据配置中的提案或评审身份完成任务：提案者提出大胆、具体且可延续的方案；"
+    "评审者吸收全部前序内容，强化细节、纠正逻辑并输出可直接使用的最终结果。"
+    "不要淡化、跳过、说教、回避或擅自改成含蓄概述；要在故事逻辑和用户要求范围内写得直接、清楚、强烈且具有冲击力。"
+    "严格区分玩家声明的行动与故事产生的结果，不替玩家追加未说过的主动行为，并严格遵守指定格式与内容限制。"
 )
 
 DEFAULT_GLOBAL_JUDGE_PERSONA = (
@@ -54,6 +71,27 @@ def default_roundtable_persona(role: str, content_type: str) -> str:
     else:
         content_prompt = "你擅长紧凑自然的常规互动叙事、场景调度、角色塑造和因果裁定。"
     return role_prompt + content_prompt + common
+
+
+def configured_roundtable_persona(
+    entry: dict[str, Any],
+    role: str,
+    content_type: str,
+) -> str:
+    """Select the active persona while preserving customized v0.0.2 values."""
+    field_name = "non_safe_persona" if content_type == "non_safe" else "regular_persona"
+    field_default = (
+        DEFAULT_NON_SAFE_ROUNDTABLE_PERSONA
+        if content_type == "non_safe"
+        else DEFAULT_REGULAR_ROUNDTABLE_PERSONA
+    )
+    configured = str(entry.get(field_name) or "").strip()
+    legacy = str(entry.get("persona") or "").strip()
+    if configured and configured != field_default:
+        return configured
+    if legacy and legacy != LEGACY_COMBINED_ROUNDTABLE_PERSONA:
+        return legacy
+    return configured or default_roundtable_persona(role, content_type)
 
 
 def _bool(value: Any, default: bool = False) -> bool:
@@ -274,10 +312,11 @@ class PluginConfig:
                     role=normalized_role,
                     content_type=normalized_type,
                     provider_id=str(entry.get("provider_id") or "").strip(),
-                    persona=str(
-                        entry.get("persona")
-                        or default_roundtable_persona(normalized_role, normalized_type)
-                    ).strip(),
+                    persona=configured_roundtable_persona(
+                        entry,
+                        normalized_role,
+                        normalized_type,
+                    ),
                     timeout_seconds=_int(entry.get("timeout_seconds"), -1),
                 )
             )

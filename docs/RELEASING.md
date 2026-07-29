@@ -11,8 +11,8 @@
 5. 运行验证：
 
 ```powershell
-python -B -m unittest -v test_core
-python -m compileall -q main.py services test_core.py scripts
+python -B -m unittest -v test_core test_astrbot_integration
+python -m compileall -q main.py services test_core.py test_astrbot_integration.py scripts
 python scripts/validate_release.py
 ```
 
@@ -21,9 +21,9 @@ python scripts/validate_release.py
 提交所有变更后创建并推送标签：
 
 ```powershell
-git tag -a v0.0.1 -m "v0.0.1"
+git tag -a v0.0.3 -m "v0.0.3"
 git push origin main
-git push origin v0.0.1
+git push origin v0.0.3
 ```
 
 标签会触发 `.github/workflows/release.yml`：
@@ -45,3 +45,7 @@ GitHub Release 成功后，前往 [AstrBot 插件发布页面](https://cloud.ast
 ## v0.0.2
 
 原生指令、函数工具、配置预设与回归测试版本的发布说明见 [v0.0.2](releases/v0.0.2.md)。
+
+## v0.0.3
+
+配置副标题、分类人设与新版帮助菜单的发布说明见 [v0.0.3](releases/v0.0.3.md)。

@@ -74,6 +74,24 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parse("/读档 1"), {"name": "load", "slot": "1"})
         self.assertEqual(parse("/圆桌会议"), {"name": "roundtable"})
 
+    def test_story_help_menu_matches_public_copy(self) -> None:
+        self.assertEqual(
+            self.module.HELP_TEXT,
+            """Game Start：
+/故事 开始 [要求]
+/故事 加入@房主 [角色要求]
+/故事 结束
+
+存档与读档（有4个槽位）：
+/存档 1 - 保存到1~4号槽
+/读档 1 - 读取1~4号槽
+
+查看最近AI之间的剧情讨论：
+/圆桌会议
+
+启用自然语言后，操作和游玩行动也可直接 @我 用正常说话表达。""",
+        )
+
     async def test_registered_command_bridge_handles_astrbot_stripped_prefix(self) -> None:
         class Event:
             stopped = False

@@ -30,14 +30,19 @@ from .services.storage import RoomBusyRegistry, StateStore
 
 
 PLUGIN_NAME = "astrbot_plugin_ai_interactive_fiction"
-HELP_TEXT = """互动故事指令：
-/故事 开始 [要求] - 开始一局故事
-/故事 加入@房主 [角色要求] - 加入多人故事
-/故事 结束 - 房主结束故事，参与者退出房间
+HELP_TEXT = """Game Start：
+/故事 开始 [要求]
+/故事 加入@房主 [角色要求]
+/故事 结束
+
+存档与读档（有4个槽位）：
 /存档 1 - 保存到1~4号槽
 /读档 1 - 读取1~4号槽
-/圆桌会议 - 查看最近一次行动的圆桌讨论
-仅输入 /故事 可再次查看本菜单。启用自然语言后，上述操作和游玩行动也可直接用正常说话表达。"""
+
+查看最近AI之间的剧情讨论：
+/圆桌会议
+
+启用自然语言后，操作和游玩行动也可直接 @我 用正常说话表达。"""
 INVALID_SLOT_TEXT = "只有4个存档槽，请输入数字1~4"
 SAVE_DISABLED_TEXT = "该故事未开启存档/读档功能"
 REWOUND_TEXT = "角色因世界回溯消失，请重新加入"
@@ -49,7 +54,7 @@ GENERATION_FAILED_TEXT = "生成失败，请配置或检查模型"
     PLUGIN_NAME,
     "Lan",
     "基于多模型圆桌会议的单人及群聊互动故事插件",
-    "0.0.2",
+    "0.0.3",
 )
 class AIInteractiveFictionPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
