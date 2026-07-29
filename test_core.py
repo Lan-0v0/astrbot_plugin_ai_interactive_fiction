@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from services.config import (
     DEFAULT_CONTENT_LIMIT,
+    DEFAULT_GLOBAL_STORY_PERSONA,
     DEFAULT_GLOBAL_JUDGE_PERSONA,
     DEFAULT_NON_SAFE_ROUNDTABLE_PERSONA,
     DEFAULT_REGULAR_ROUNDTABLE_PERSONA,
@@ -34,6 +35,7 @@ from services.roundtable import (
     RoundtableOutput,
     RoundtableService,
 )
+from services.story_generator import StoryGenerationRequest, StoryGeneratorService
 from services.saves import SaveService
 from services.storage import RoomBusyRegistry, StateStore
 from services.workflows import ImageGenerationError, merge_workflow, set_dot_path
@@ -127,6 +129,21 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(disabled.enabled)
         self.assertEqual(cfg.global_judge_persona, DEFAULT_GLOBAL_JUDGE_PERSONA)
 
+    def test_global_story_defaults_and_roundtable_triggers(self) -> None:
+        cfg = PluginConfig({})
+        self.assertEqual(cfg.global_story_persona, DEFAULT_GLOBAL_STORY_PERSONA)
+        self.assertEqual(cfg.roundtable_triggers, {"non_safe", "draft"})
+        custom = PluginConfig(
+            {
+                "global_story_provider_id": "story-model",
+                "global_story_persona": "custom",
+                "roundtable_triggers": ["normal_action", "unknown"],
+            }
+        )
+        self.assertEqual(custom.global_story_provider_id, "story-model")
+        self.assertEqual(custom.global_story_persona, "custom")
+        self.assertEqual(custom.roundtable_triggers, {"normal_action"})
+
     def test_roundtable_uses_persona_for_selected_content_type(self) -> None:
         regular = PluginConfig(
             {
@@ -190,11 +207,9 @@ class ConfigTests(unittest.TestCase):
         }
         for key, template in templates.items():
             if key == "roundtable":
-                self.assertEqual(
-                    template["display_item"],
-                    ["name", "role_display", "content_type_display"],
-                )
-                self.assertEqual(template["display_item_separator"], "——")
+                self.assertEqual(template["display_item"], "display_name")
+                self.assertEqual(template["items"]["display_name"]["type"], "string")
+                self.assertTrue(template["items"]["display_name"]["invisible"])
             else:
                 self.assertEqual(template["display_item"], "name")
             self.assertTrue(template["hide_hint_in_list"])
@@ -226,6 +241,12 @@ class ConfigTests(unittest.TestCase):
             "人物首次生成使用文生图，后续CG使用缓存图改图以确保人物一致性；按优先级从高到低失败切换模型",
         )
         self.assertEqual(schema["global_judge_persona"]["default"], DEFAULT_GLOBAL_JUDGE_PERSONA)
+        self.assertEqual(schema["global_story_persona"]["default"], DEFAULT_GLOBAL_STORY_PERSONA)
+        self.assertEqual(schema["roundtable_triggers"]["default"], ["non_safe", "draft"])
+        self.assertEqual(
+            list(schema)[list(schema).index("stories") + 1 : list(schema).index("roundtable_models")],
+            ["global_story_provider_id", "global_story_persona", "roundtable_triggers"],
+        )
         self.assertEqual(
             schema["image_generation_triggers"]["default"],
             [
@@ -447,9 +468,14 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
                     bible={"tone": "青春"},
                     character={"appearance": "JK制服"},
                     output_dir=Path("unused"),
+                    environment_context="月光照进旧教室",
                 )
-                self.assertEqual(result.prompt, "日系二次元画风，output-prompt-model")
+                self.assertEqual(
+                    result.prompt,
+                    "日系二次元画风，output-prompt-model，当前环境背景：月光照进旧教室",
+                )
                 self.assertIn("用户指定画风：日系二次元", llm.prompts[0])
+                self.assertIn("月光照进旧教室", llm.prompts[0])
                 self.assertEqual(runner.generate.await_args.kwargs["prompt"], result.prompt)
 
     async def test_scene_image_uses_scene_prompt_and_generate_model(self) -> None:
@@ -507,6 +533,68 @@ class Logger:
         return None
 
 
+class StoryGeneratorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_direct_result_is_used_when_no_trigger_matches(self) -> None:
+        llm = FakeLLM()
+        roundtable = unittest.mock.AsyncMock()
+        service = StoryGeneratorService(
+            llm,
+            roundtable,
+            provider_id="story",
+            persona="persona",
+            roundtable_triggers={"draft"},
+            logger=Logger(),
+        )
+        output = await service.generate(
+            StoryGenerationRequest("task"),
+            trigger_types={"normal_action"},
+        )
+        self.assertEqual(output.final_text, "output-story")
+        self.assertEqual(output.discussion, [])
+        roundtable.run.assert_not_awaited()
+
+    async def test_matching_trigger_sends_global_draft_to_roundtable(self) -> None:
+        llm = FakeLLM()
+        roundtable = unittest.mock.AsyncMock()
+        roundtable.run.return_value = RoundtableOutput(
+            "roundtable-final",
+            [{"label": "reviewer", "content": "roundtable-final"}],
+        )
+        service = StoryGeneratorService(
+            llm,
+            roundtable,
+            provider_id="story",
+            persona="persona",
+            roundtable_triggers={"non_safe"},
+            logger=Logger(),
+        )
+        output = await service.generate(
+            StoryGenerationRequest("task", content_type="non_safe"),
+            trigger_types={"non_safe", "normal_action"},
+        )
+        self.assertEqual(output.final_text, "roundtable-final")
+        self.assertEqual(roundtable.run.await_args.kwargs["initial_draft"], "output-story")
+        self.assertEqual(roundtable.run.await_args.kwargs["content_type"], "non_safe")
+
+    async def test_missing_global_story_provider_falls_back_to_roundtable(self) -> None:
+        roundtable = unittest.mock.AsyncMock()
+        roundtable.run.return_value = RoundtableOutput("fallback", [])
+        service = StoryGeneratorService(
+            FakeLLM(),
+            roundtable,
+            provider_id="",
+            persona="persona",
+            roundtable_triggers=set(),
+            logger=Logger(),
+        )
+        output = await service.generate(
+            StoryGenerationRequest("task"),
+            trigger_types={"normal_action"},
+        )
+        self.assertEqual(output.final_text, "fallback")
+        self.assertEqual(roundtable.run.await_args.kwargs["initial_draft"], "")
+
+
 class JudgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_opening_render_prompts_apply_visible_character_limits(self) -> None:
         llm = FakeLLM()
@@ -555,6 +643,10 @@ class JudgeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("场景变换", llm.prompts[0])
 
+    def test_route_prompt_defines_roundtable_action_classification(self) -> None:
+        self.assertIn('"action_level":"normal|high_risk_complex"', GlobalJudge.ROUTE_SYSTEM)
+        self.assertIn('"requests_story_change":false', GlobalJudge.ROUTE_SYSTEM)
+
 
 class StructuredOutputTests(unittest.IsolatedAsyncioTestCase):
     def test_json_parser_extracts_largest_balanced_object(self) -> None:
@@ -592,21 +684,21 @@ class StructuredOutputTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
-class FakeRoundtable:
+class FakeGenerator:
     def __init__(self, payload: dict, discussion: list[dict[str, str]] | None = None) -> None:
         self.payload = payload
         self.discussion = discussion or []
         self.calls: list[dict] = []
 
-    async def run(self, task: str, **kwargs) -> RoundtableOutput:
-        self.calls.append({"task": task, **kwargs})
+    async def generate(self, request: StoryGenerationRequest, **kwargs) -> RoundtableOutput:
+        self.calls.append({"task": request.task, **kwargs})
         return RoundtableOutput(json.dumps(self.payload, ensure_ascii=False), self.discussion)
 
 
 class GameTests(unittest.IsolatedAsyncioTestCase):
     async def test_random_story_runtime_fields_are_built_from_roundtable(self) -> None:
         discussion = [{"label": "model", "content": "proposal"}]
-        roundtable = FakeRoundtable(
+        generator = FakeGenerator(
             {
                 "story_bible": {"title": "随机故事"},
                 "public_player_profile": {"name": "玩家"},
@@ -617,7 +709,7 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
             },
             discussion,
         )
-        game = GameService(roundtable, object())
+        game = GameService(generator, object())
         built = await game.build_story(
             None,
             requirements="主角是女性",
@@ -632,18 +724,18 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(built.discussion, discussion)
         room = game.create_room("owner", "玩家", "origin", built)
         self.assertEqual(room.latest_discussion, discussion)
-        self.assertIn("主角是女性", roundtable.calls[0]["task"])
+        self.assertIn("主角是女性", generator.calls[0]["task"])
 
     async def test_join_character_keeps_roundtable_discussion(self) -> None:
         discussion = [{"label": "reviewer", "content": "character"}]
-        roundtable = FakeRoundtable(
+        generator = FakeGenerator(
             {
                 "public_player_profile": {"name": "新玩家"},
                 "private_player_profile": {"secret": "x"},
             },
             discussion,
         )
-        game = GameService(roundtable, object())
+        game = GameService(generator, object())
         room = make_room()
 
         built = await game.build_join_character(
@@ -657,6 +749,41 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RoundtableTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sequential_roundtable_starts_from_global_story_draft(self) -> None:
+        models = [
+            RoundtableModelConfig("p", True, 1, "proposal", "regular", "p", "", -1),
+            RoundtableModelConfig("r", True, 1, "reviewer", "regular", "r", "", -1),
+        ]
+        llm = FakeLLM()
+        output = await RoundtableService(
+            llm,
+            models,
+            mode="sequential",
+            rounds=1,
+            logger=Logger(),
+        ).run("task", initial_draft="global-draft")
+        self.assertIn("全局故事生成LLM底稿：global-draft", llm.prompts[0])
+        self.assertNotIn(
+            "global-draft",
+            "\n".join(item["content"] for item in output.discussion),
+        )
+
+    async def test_independent_roundtable_only_gives_global_draft_to_reviewers(self) -> None:
+        models = [
+            RoundtableModelConfig("p", True, 1, "proposal", "regular", "p", "", -1),
+            RoundtableModelConfig("r", True, 1, "reviewer", "regular", "r", "", -1),
+        ]
+        llm = FakeLLM()
+        await RoundtableService(
+            llm,
+            models,
+            mode="independent",
+            rounds=1,
+            logger=Logger(),
+        ).run("task", initial_draft="global-draft")
+        self.assertNotIn("global-draft", llm.prompts[0])
+        self.assertIn("全局故事生成LLM底稿：global-draft", llm.prompts[1])
+
     async def test_high_priority_runs_last_and_last_reviewer_wins(self) -> None:
         models = [
             RoundtableModelConfig("p-high", True, 90, "proposal", "regular", "p-high", "", -1),

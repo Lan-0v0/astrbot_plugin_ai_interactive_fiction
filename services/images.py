@@ -218,6 +218,7 @@ class ImageService:
         character: dict[str, Any],
         output_dir: Path,
         event_context: str = "首次登场",
+        environment_context: str = "",
         input_image: Path | None = None,
         original_prompt: str = "",
         non_safe: bool = False,
@@ -230,13 +231,21 @@ class ImageService:
                     raise ImageGenerationError(f"{generator.name}未配置提示词生成模型")
                 timeout = int(generator.raw.get("timeout_seconds") or -1)
                 timeout = self.default_timeout if timeout < 0 else max(1, timeout)
+                prompt_event_context = event_context
+                if (
+                    environment_context.strip()
+                    and environment_context.strip() not in prompt_event_context
+                ):
+                    prompt_event_context = (
+                        f"{prompt_event_context}。当前可见环境：{environment_context.strip()}"
+                    )
                 prompt = await self.llm.generate(
                     generator.prompt_provider_id,
                     image_prompt_task(
                         bible=bible,
                         character=character,
                         mode=mode,
-                        event_context=event_context,
+                        event_context=prompt_event_context,
                         original_prompt=original_prompt,
                         style=generator.style,
                     ),
@@ -246,6 +255,8 @@ class ImageService:
                 if not prompt.strip():
                     raise ImageGenerationError(f"{generator.name}的提示词生成模型返回空内容")
                 prompt = apply_art_style(prompt, generator.style)
+                if environment_context.strip():
+                    prompt = f"{prompt}，当前环境背景：{environment_context.strip()}"
                 if generator.kind == "openai":
                     path = await self.openai.generate(
                         generator,

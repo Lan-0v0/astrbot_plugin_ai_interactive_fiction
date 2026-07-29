@@ -8,7 +8,7 @@
   },
   "stories": {
     "description": "自定义故事条目",
-    "hint": "未填写的世界观、主角等内容由圆桌会议自动补充",
+    "hint": "未填写的世界观、主角等内容由全局故事生成LLM自动补充",
     "type": "template_list",
     "templates": {
       "story": {
@@ -103,6 +103,26 @@
       }
     }
   },
+  "global_story_provider_id": {
+    "description": "全局故事生成LLM",
+    "hint": "选择 AstrBot 已配置的模型；负责底稿、角色创建和日常故事行动的直接生成",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider"
+  },
+  "global_story_persona": {
+    "description": "全局故事生成LLM人设",
+    "type": "text",
+    "default": "你是互动故事的全局故事生成模型，负责生成隐藏故事底稿、玩家角色和每轮行动结果。你擅长短篇互动叙事、因果裁定、角色一致性、场景调度与动态节奏控制，能够依据世界规则判断行动结果，并为后续互动保留清晰状态。严格区分玩家声明的行动与故事产生的结果，只用第二人称“你”称呼玩家，不替玩家追加未说过的主动行为。对暴力、血腥、性等非安全题材只按故事逻辑和用户要求选择对应内容路径，不说教、不擅自淡化或改写意图。始终遵守任务指定的JSON结构、字数限制、世界观和角色设定，只输出可直接交给插件处理的内容。"
+  },
+  "roundtable_triggers": {
+    "description": "圆桌会议触发时机",
+    "hint": "一次生成命中任意已勾选项时进入圆桌；未命中时直接使用全局故事生成LLM结果",
+    "type": "list",
+    "default": ["non_safe", "draft"],
+    "options": ["non_safe", "draft", "character_creation", "normal_action", "high_risk_complex_action", "story_change_request"],
+    "labels": ["非安全内容", "底稿", "角色创建", "普通行动", "高风险/复杂行动", "玩家明确要求改动剧情"]
+  },
   "roundtable_models": {
     "description": "圆桌会议",
     "hint": "提案和评审均按低优先级到高优先级执行，让高优先级模型获得更多上下文",
@@ -110,11 +130,16 @@
     "templates": {
       "model": {
         "name": "圆桌模型",
-        "display_item": ["name", "role_display", "content_type_display"],
-        "display_item_separator": "——",
+        "display_item": "display_name",
         "hide_hint_in_list": true,
         "items": {
           "name": {"description": "名称", "type": "string", "default": "圆桌成员"},
+          "display_name": {
+            "description": "名称",
+            "type": "string",
+            "default": "圆桌成员——提案——常规",
+            "invisible": true
+          },
           "enabled": {"description": "启用", "type": "bool", "default": true},
           "priority": {
             "description": "优先级",
@@ -141,18 +166,6 @@
             "default": "regular",
             "options": ["regular", "non_safe"],
             "labels": ["常规", "非安全"]
-          },
-          "role_display": {
-            "description": "身份显示值",
-            "type": "string",
-            "default": "提案",
-            "invisible": true
-          },
-          "content_type_display": {
-            "description": "内容类型显示值",
-            "type": "string",
-            "default": "常规",
-            "invisible": true
           },
           "regular_persona": {
             "description": "常规内容人设提示词",

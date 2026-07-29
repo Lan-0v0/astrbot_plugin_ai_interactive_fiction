@@ -71,6 +71,7 @@ class RoundtableService:
         temperature: float = 1.0,
         output_validator: Callable[[str], bool] | None = None,
         repair_instruction: str = "",
+        initial_draft: str = "",
     ) -> RoundtableOutput:
         proposers = self._select_role("proposal", content_type)
         reviewers = self._select_role("reviewer", content_type)
@@ -78,7 +79,12 @@ class RoundtableService:
             raise RoundtableConfigurationError("缺少常规/非安全模型配置")
 
         discussion: list[dict[str, str]] = []
-        proposal_context: list[str] = []
+        draft_context = (
+            [f"全局故事生成LLM底稿：{initial_draft.strip()}"]
+            if initial_draft.strip()
+            else []
+        )
+        proposal_context: list[str] = list(draft_context) if self.mode != "independent" else []
         if self.mode == "independent":
             results = await asyncio.gather(
                 *[
@@ -117,10 +123,14 @@ class RoundtableService:
                 if len(proposal_context) == successes_before:
                     break
 
-        if not proposal_context:
+        if not proposal_context and not draft_context:
             raise RoundtableGenerationError("生成失败，请配置或检查模型")
 
-        review_context = list(proposal_context)
+        review_context = (
+            list(draft_context) + list(proposal_context)
+            if self.mode == "independent"
+            else list(proposal_context)
+        )
         final_text = ""
         reviewer_success = False
         last_valid_text = ""

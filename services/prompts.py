@@ -84,7 +84,7 @@ def action_task(
     content_type: str,
     forbid_player_autonomy: bool,
     current_choices: list[str],
-    include_psychology: bool,
+    include_psychology: bool | None,
     word_limits: WordLimits | None = None,
 ) -> str:
     limits = word_limits or WordLimits()
@@ -95,6 +95,11 @@ def action_task(
     )
     if content_type == "non_safe":
         narrative_rule = f"非安全内容：具体行动＋与对方的过程＋结果，不超过{narrative_chars}字。"
+    elif content_type == "auto":
+        narrative_rule = (
+            f"请自行按行动内容选择路径：常规内容不超过{limits.regular_content_chars}字；"
+            f"暴力、血腥、性等非安全内容不超过{limits.non_safe_content_chars}字。"
+        )
     else:
         narrative_rule = f"常规内容（移动、道具介绍等一般性质内容）：行为＋场景介绍，不超过{narrative_chars}字。"
     autonomy = (
@@ -117,7 +122,7 @@ def action_task(
 上一轮给出的候选行动：{json.dumps(current_choices, ensure_ascii=False) if current_choices else '无'}
 行动者ID：{actor_id}
 玩家原始行动（不得改写成已成功的事实）：{action}
-本轮是否确有必要附带心理描写：{include_psychology}。即使为true也不得替玩家决定感受、意志或后续行动，且不超过{limits.psychology_chars}字。
+本轮是否确有必要附带心理描写：{include_psychology if include_psychology is not None else '由你仅按确有必要时判断'}。即使为true也不得替玩家决定感受、意志或后续行动，且不超过{limits.psychology_chars}字。
 
 只输出JSON对象，不加代码块：
 {{

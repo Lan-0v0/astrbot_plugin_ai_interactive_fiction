@@ -10,7 +10,12 @@ from .llm import parse_json_object
 from .memory import MemoryService
 from .models import RoomMember, StoryRoom
 from .prompts import action_task, join_character_task, story_creation_task
-from .roundtable import RoundtableGenerationError, RoundtableOutput, RoundtableService
+from .roundtable import RoundtableGenerationError, RoundtableOutput
+from .story_generator import (
+    PreparedStoryGeneration,
+    StoryGenerationRequest,
+    StoryGeneratorService,
+)
 
 
 @dataclass(slots=True)
@@ -51,11 +56,11 @@ class ActionResult:
 class GameService:
     def __init__(
         self,
-        roundtable: RoundtableService,
+        generator: StoryGeneratorService,
         memory: MemoryService,
         word_limits: WordLimits | None = None,
     ):
-        self.roundtable = roundtable
+        self.generator = generator
         self.memory = memory
         self.word_limits = word_limits or WordLimits()
 
@@ -67,8 +72,12 @@ class GameService:
         owner_name: str,
         content_type: str,
     ) -> BuiltStory:
-        output = await self.roundtable.run(
-            story_creation_task(story, player_requirements=requirements, owner_name=owner_name),
+        request = StoryGenerationRequest(
+            task=story_creation_task(
+                story,
+                player_requirements=requirements,
+                owner_name=owner_name,
+            ),
             content_type=content_type,
             temperature=story.temperature if story else 1.0,
             output_validator=_is_story_payload,
@@ -77,6 +86,10 @@ class GameService:
                 "public_player_profile，以及恰好3项字符串的opening_choices；"
                 "同时保留private_player_profile、opening_state和runtime。"
             ),
+        )
+        output = await self.generator.generate(
+            request,
+            trigger_types=self._trigger_types("draft", content_type),
         )
         parsed = parse_json_object(output.final_text)
         if not parsed:
@@ -123,8 +136,8 @@ class GameService:
         owner = room.members.get(room.owner_id)
         if owner is None:
             raise RoundtableGenerationError("生成失败，请配置或检查模型")
-        output = await self.roundtable.run(
-            join_character_task(
+        request = StoryGenerationRequest(
+            task=join_character_task(
                 bible=room.bible,
                 owner_character=owner.character,
                 requirements=requirements,
@@ -137,6 +150,10 @@ class GameService:
                 "顶层必须是JSON对象，且必须包含对象类型的public_player_profile；"
                 "同时保留对象类型的private_player_profile。"
             ),
+        )
+        output = await self.generator.generate(
+            request,
+            trigger_types=self._trigger_types("character_creation", content_type),
         )
         parsed = parse_json_object(output.final_text)
         if not parsed or not isinstance(parsed.get("public_player_profile"), dict):
@@ -158,15 +175,46 @@ class GameService:
         content_type: str,
         forbid_player_autonomy: bool,
         include_psychology: bool = False,
+        trigger_types: set[str] | None = None,
+        prepared: PreparedStoryGeneration | None = None,
     ) -> ActionResult:
+        if prepared is None:
+            prepared = await self.prepare_action(
+                room,
+                actor_id=actor_id,
+                action=action,
+                content_type=content_type,
+                forbid_player_autonomy=forbid_player_autonomy,
+                include_psychology=include_psychology,
+            )
+        output = await self.generator.complete(
+            prepared,
+            trigger_types=set(trigger_types or {"normal_action"}),
+            content_type=content_type,
+        )
+        result = self._parse_action(output)
+        if not include_psychology:
+            result.psychology = ""
+        return result
+
+    async def prepare_action(
+        self,
+        room: StoryRoom,
+        *,
+        actor_id: str,
+        action: str,
+        content_type: str = "auto",
+        forbid_player_autonomy: bool,
+        include_psychology: bool | None = None,
+    ) -> PreparedStoryGeneration:
         story = StoryConfig.from_runtime_dict(room.story_config)
         memory_context = await self.memory.context_for_action(room, story)
         characters = {
             "players": {user_id: member.character for user_id, member in room.members.items()},
             "known_npcs": room.known_characters,
         }
-        output = await self.roundtable.run(
-            action_task(
+        request = StoryGenerationRequest(
+            task=action_task(
                 story=story,
                 bible=room.bible,
                 world_state=room.world_state,
@@ -188,7 +236,14 @@ class GameService:
                 "死亡或结束时choices可以为空。保留状态、人物、CG和conversation_character_id字段。"
             ),
         )
-        return self._parse_action(output)
+        return await self.generator.prepare(request)
+
+    @staticmethod
+    def _trigger_types(event_type: str, content_type: str) -> set[str]:
+        result = {event_type}
+        if content_type == "non_safe":
+            result.add("non_safe")
+        return result
 
     @staticmethod
     def _parse_action(output: RoundtableOutput) -> ActionResult:

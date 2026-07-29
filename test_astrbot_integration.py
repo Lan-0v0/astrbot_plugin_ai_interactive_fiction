@@ -47,7 +47,7 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
         from astrbot.core.star.filter.command import CommandFilter
         from astrbot.core.star.star_handler import EventType, star_handlers_registry
 
-        expected = {"故事", "存档", "读档", "圆桌会议"}
+        expected = {"故事", "存档", "读档", "圆桌会议", "查看故事"}
         found: dict[str, int] = {}
         handlers = star_handlers_registry.get_handlers_by_event_type(EventType.AdapterMessageEvent)
         for handler in handlers:
@@ -72,7 +72,8 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
         parse = self.module.AIInteractiveFictionPlugin._parse_command
         self.assertEqual(parse("/故事"), {"name": "help"})
         self.assertEqual(parse("/故事 开始 主角是女性"), {"name": "start", "args": "主角是女性"})
-        self.assertEqual(parse("/故事 继续"), {"name": "continue"})
+        self.assertEqual(parse("/故事 继续"), {"name": "action", "args": "继续"})
+        self.assertEqual(parse("/查看故事"), {"name": "view_story"})
         self.assertEqual(parse("/故事 2"), {"name": "action", "args": "2"})
         self.assertEqual(parse("/故事 杀害"), {"name": "action", "args": "杀害"})
         self.assertEqual(parse("/存档 5"), {"name": "save", "slot": "5"})
@@ -85,9 +86,11 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
             """Game Start：
 /故事 开始 [要求]
 /故事 加入@房主 [角色要求]
-/故事 继续
 /故事 [选项或行动]
 /故事 结束
+
+查看最近一次故事回复：
+/查看故事
 
 存档与读档（有4个槽位）：
 /存档 1 - 保存到1~4号槽
@@ -445,6 +448,82 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
             "已有玩家的行动正在处理中，请等待故事回复",
         )
 
+    async def test_command_action_runs_judge_and_story_draft_concurrently(self) -> None:
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.config import StoryConfig
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.models import StoryRoom
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.storage import RoomBusyRegistry
+
+        room = StoryRoom(
+            room_id="room-1",
+            owner_id="10001",
+            story_config=StoryConfig("story", "测试", enabled=True).to_runtime_dict(),
+            bible={},
+            members={},
+            created_at=1,
+            last_active_at=1,
+        )
+        judge_started = asyncio.Event()
+        story_started = asyncio.Event()
+        release_judge = asyncio.Event()
+        prepared = object()
+
+        async def judge_route(*_args, **_kwargs):
+            judge_started.set()
+            await asyncio.wait_for(story_started.wait(), 1)
+            await asyncio.wait_for(release_judge.wait(), 1)
+            return {
+                "reasonable": True,
+                "content_type": "regular",
+                "action_level": "high_risk_complex",
+                "requests_story_change": False,
+            }
+
+        async def prepare_story(*_args, **_kwargs):
+            story_started.set()
+            await asyncio.wait_for(judge_started.wait(), 1)
+            return prepared
+
+        plugin = object.__new__(self.module.AIInteractiveFictionPlugin)
+        plugin.store = SimpleNamespace(room_for_user=lambda _user_id: room, rewound_users={})
+        plugin.busy = RoomBusyRegistry()
+        plugin.config = SimpleNamespace(forbid_player_autonomy=True)
+        plugin.judge = SimpleNamespace(route=AsyncMock(side_effect=judge_route))
+        plugin.game = SimpleNamespace(prepare_action=AsyncMock(side_effect=prepare_story))
+        plugin._perform_action = AsyncMock()
+        plugin._send_text = AsyncMock()
+
+        first_action = asyncio.create_task(
+            plugin._perform_command_action(object(), "10001", "打开机关门")
+        )
+        await asyncio.wait_for(judge_started.wait(), 1)
+        await asyncio.wait_for(story_started.wait(), 1)
+        await plugin._perform_command_action(object(), "10001", "抢先穿过门")
+        plugin._send_text.assert_awaited_once_with(
+            unittest.mock.ANY,
+            "已有玩家的行动正在处理中，请等待故事回复",
+        )
+        release_judge.set()
+        await first_action
+
+        plugin._perform_action.assert_awaited_once()
+        kwargs = plugin._perform_action.await_args.kwargs
+        self.assertIs(kwargs["prepared"], prepared)
+        self.assertEqual(kwargs["trigger_types"], {"high_risk_complex_action"})
+        self.assertTrue(kwargs["lock_already_held"])
+        plugin.busy.finish(room.room_id)
+
+    def test_roundtable_action_trigger_categories_are_exclusive_except_non_safe(self) -> None:
+        classify = self.module.AIInteractiveFictionPlugin._roundtable_action_triggers
+        self.assertEqual(classify({}, "regular"), {"normal_action"})
+        self.assertEqual(
+            classify({"action_level": "high_risk_complex"}, "regular"),
+            {"high_risk_complex_action"},
+        )
+        self.assertEqual(
+            classify({"requests_story_change": True}, "non_safe"),
+            {"story_change_request", "non_safe"},
+        )
+
     def test_roundtable_display_fields_are_chinese(self) -> None:
         plugin = object.__new__(self.module.AIInteractiveFictionPlugin)
         config = MagicMock()
@@ -457,8 +536,8 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
         }
         plugin._normalize_roundtable_display_fields()
         first, second = plugin.raw_config["roundtable_models"]
-        self.assertEqual((first["role_display"], first["content_type_display"]), ("提案", "常规"))
-        self.assertEqual((second["role_display"], second["content_type_display"]), ("评审", "非安全"))
+        self.assertEqual(first["display_name"], "智谱——提案——常规")
+        self.assertEqual(second["display_name"], "评审——评审——非安全")
         config.save_config.assert_called_once_with(replace_config=plugin.raw_config)
 
     async def test_action_lock_rejects_later_action_with_message(self) -> None:

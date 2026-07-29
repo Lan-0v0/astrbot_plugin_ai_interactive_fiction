@@ -160,7 +160,7 @@ class LLMService:
 class GlobalJudge:
     ROUTE_SYSTEM = """你是互动故事插件的全局轻量判断器。你只判断意图、行动边界和内容类型，不续写剧情，不决定行动结果。
 必须只输出JSON对象：
-{"intent":"chat|start|select_story|join|end|save|load|roundtable|action","slot":null,"owner_id":"","requirements":"","story_choice":"","content_type":"regular|non_safe","reasonable":true,"include_psychology":false}
+{"intent":"chat|start|select_story|join|end|save|load|roundtable|action","slot":null,"owner_id":"","requirements":"","story_choice":"","content_type":"regular|non_safe","reasonable":true,"include_psychology":false,"action_level":"normal|high_risk_complex","requests_story_change":false}
 规则：
 1. 普通聊天必须是chat；只有明确想开始、加入、结束、存读档、查看圆桌或在现有故事中采取行动时才选其他意图。
 2. 玩家只能陈述自己要做什么，不能自行宣告成功、掉落、升级、击杀结果。此类内容根据行动限制判断reasonable。
@@ -170,6 +170,8 @@ class GlobalJudge:
 6. select_story用于回答故事选择菜单，story_choice填写编号、名称或random。
 7. join时owner_id尽量提取房主QQ，requirements只保留角色要求。
 8. include_psychology只在当前结果确实必须有极短心理描写时为true；通常为false，绝不能借此替玩家决定感受、想法或意志。
+9. action_level只分类行动生成难度：涉及多步骤推理、重大不可逆后果、多个角色或规则冲突时为high_risk_complex；普通移动、观察、交谈、使用物品等为normal。暴力或非安全本身不自动等于复杂。
+10. 玩家明确要求修改、覆盖或重写既有世界观、主线、角色设定或剧情走向时requests_story_change为true；单纯在世界内采取行动为false。
 """
 
     def __init__(self, llm: LLMService, provider_id: str, persona: str = ""):

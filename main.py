@@ -28,15 +28,18 @@ from .services.roundtable import (
 )
 from .services.saves import SaveService
 from .services.storage import RoomBusyRegistry, StateStore
+from .services.story_generator import PreparedStoryGeneration, StoryGeneratorService
 
 
 PLUGIN_NAME = "astrbot_plugin_ai_interactive_fiction"
 HELP_TEXT = """Game Start：
 /故事 开始 [要求]
 /故事 加入@房主 [角色要求]
-/故事 继续
 /故事 [选项或行动]
 /故事 结束
+
+查看最近一次故事回复：
+/查看故事
 
 存档与读档（有4个槽位）：
 /存档 1 - 保存到1~4号槽
@@ -84,8 +87,16 @@ class AIInteractiveFictionPlugin(Star):
             rounds=self.config.discussion_rounds,
             logger=logger,
         )
+        self.story_generator = StoryGeneratorService(
+            self.llm,
+            self.roundtable,
+            provider_id=self.config.global_story_provider_id,
+            persona=self.config.global_story_persona,
+            roundtable_triggers=self.config.roundtable_triggers,
+            logger=logger,
+        )
         self.memory = MemoryService(self.llm, logger)
-        self.game = GameService(self.roundtable, self.memory, self.config.word_limits)
+        self.game = GameService(self.story_generator, self.memory, self.config.word_limits)
         self.images = ImageService(
             self.llm,
             self.config.image_generators,
@@ -110,11 +121,10 @@ class AIInteractiveFictionPlugin(Star):
                 str(entry.get("content_type") or "regular"),
                 "常规",
             )
-            if entry.get("role_display") != role_display:
-                entry["role_display"] = role_display
-                changed = True
-            if entry.get("content_type_display") != content_display:
-                entry["content_type_display"] = content_display
+            name = str(entry.get("name") or "圆桌成员").strip()
+            display_name = f"{name}——{role_display}——{content_display}"
+            if entry.get("display_name") != display_name:
+                entry["display_name"] = display_name
                 changed = True
         if not changed:
             return
@@ -162,6 +172,11 @@ class AIInteractiveFictionPlugin(Star):
         """查看当前群聊最近一次故事行动的圆桌讨论"""
         await self._dispatch_registered_command(event, fallback={"name": "roundtable"})
 
+    @filter.command("查看故事", priority=1100)
+    async def view_story_command(self, event: AstrMessageEvent):
+        """重新发送最近一次故事回复及其已生成图片"""
+        await self._dispatch_registered_command(event, fallback={"name": "view_story"})
+
     @filter.llm_tool(name="interactive_fiction")
     async def interactive_fiction_tool(self, event: AstrMessageEvent, request: str):
         """执行互动故事操作或玩家行动。仅当用户明确想开始、加入、结束、存读档、查看圆桌会议或推进正在游玩的故事时调用；普通聊天不要调用。
@@ -194,6 +209,7 @@ class AIInteractiveFictionPlugin(Star):
             yield "请先使用 /故事 开始 进入故事；未开局时不会调用自然语言判断。"
             return
         story = StoryConfig.from_runtime_dict(room.story_config) if room else None
+        prepared_task = self._start_action_preparation(room, user_id, text)
         try:
             route = await self.judge.route(
                 text,
@@ -203,14 +219,23 @@ class AIInteractiveFictionPlugin(Star):
                 room_context=self._judge_room_context(room, user_id),
             )
         except Exception as exc:
+            await self._cancel_preparation(prepared_task)
             logger.warning(f"互动故事函数工具调用全局判断LLM失败: {exc}")
             yield "全局判断LLM调用失败，未执行互动故事操作。"
             return
         if not route or str(route.get("intent") or "chat") == "chat":
+            await self._cancel_preparation(prepared_task)
             yield "该请求属于普通聊天，未执行互动故事操作；请直接正常回复用户。"
             return
 
-        await self._handle_natural_route(event, user_id, text, route, room)
+        await self._handle_natural_route(
+            event,
+            user_id,
+            text,
+            route,
+            room,
+            prepared_task=prepared_task,
+        )
         yield "互动故事操作已执行，结果已直接发送给用户，无需重复回复。"
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=1000)
@@ -240,6 +265,7 @@ class AIInteractiveFictionPlugin(Star):
         ):
             return
         story = StoryConfig.from_runtime_dict(room.story_config) if room else None
+        prepared_task = self._start_action_preparation(room, user_id, text)
         try:
             route = await self.judge.route(
                 text,
@@ -249,11 +275,20 @@ class AIInteractiveFictionPlugin(Star):
                 room_context=self._judge_room_context(room, user_id),
             )
         except Exception as exc:
+            await self._cancel_preparation(prepared_task)
             logger.warning(f"全局判断LLM调用失败，消息交回AstrBot普通聊天: {exc}")
             return
         if not route or str(route.get("intent") or "chat") == "chat":
+            await self._cancel_preparation(prepared_task)
             return
-        await self._handle_natural_route(event, user_id, text, route, room)
+        await self._handle_natural_route(
+            event,
+            user_id,
+            text,
+            route,
+            room,
+            prepared_task=prepared_task,
+        )
 
     async def _dispatch_registered_command(
         self,
@@ -289,7 +324,7 @@ class AIInteractiveFictionPlugin(Star):
         if name == "end":
             await self._end_or_leave(event, user_id)
             return
-        if name == "continue":
+        if name == "view_story":
             await self._continue_last_response(event, user_id)
             return
         if name == "action":
@@ -315,8 +350,12 @@ class AIInteractiveFictionPlugin(Star):
         text: str,
         route: dict[str, Any],
         room: StoryRoom | None,
+        *,
+        prepared_task: asyncio.Task[PreparedStoryGeneration] | None = None,
     ) -> None:
         intent = str(route.get("intent") or "chat")
+        if intent != "action":
+            await self._cancel_preparation(prepared_task)
         if intent == "start":
             if room is None and user_id not in self.store.pending_starts:
                 return
@@ -358,19 +397,23 @@ class AIInteractiveFictionPlugin(Star):
             return
 
         if room is None:
+            await self._cancel_preparation(prepared_task)
             if user_id in self.store.rewound_users:
                 event.stop_event()
                 await self._send_text(event, REWOUND_TEXT)
             return
         event.stop_event()
         if not self._route_bool(route.get("reasonable"), True):
+            await self._cancel_preparation(prepared_task)
             await self._send_text(event, self.config.unreasonable_action_message)
             return
         content_type = "non_safe" if str(route.get("content_type")) == "non_safe" else "regular"
         resolved_action = self._resolve_command_action(room, text)
         if text.strip().isdigit() and not resolved_action:
+            await self._cancel_preparation(prepared_task)
             await self._send_text(event, "请输入1~3号选项，或直接描述行动")
             return
+        prepared = await self._await_preparation(prepared_task)
         await self._perform_action(
             event,
             user_id,
@@ -378,6 +421,8 @@ class AIInteractiveFictionPlugin(Star):
             resolved_action or text,
             content_type,
             include_psychology=self._route_bool(route.get("include_psychology"), False),
+            trigger_types=self._roundtable_action_triggers(route, content_type),
+            prepared=prepared,
         )
 
     async def _perform_command_action(
@@ -390,30 +435,46 @@ class AIInteractiveFictionPlugin(Star):
         if room is None:
             await self._send_text(event, REWOUND_TEXT if user_id in self.store.rewound_users else "你当前不在故事房间内")
             return
-        if self.busy.is_busy(room.room_id):
+        if not self.busy.try_begin(room.room_id):
             await self._send_text(event, "已有玩家的行动正在处理中，请等待故事回复")
             return
+        owns_room_lock = True
         action = self._resolve_command_action(room, requested_action)
         if not action:
+            self.busy.finish(room.room_id)
             await self._send_text(event, "请输入1~3号选项，或直接使用 /故事 [行动]")
             return
         story = StoryConfig.from_runtime_dict(room.story_config)
-        try:
-            route = await self.judge.route(
+        judge_task = asyncio.create_task(
+            self.judge.route(
                 action,
                 active_room=True,
                 pending_story_choice=False,
                 action_restriction=story.action_restriction,
                 room_context=self._judge_room_context(room, user_id),
             )
+        )
+        prepared_task = self._start_action_preparation(
+            room,
+            user_id,
+            action,
+            allow_busy=True,
+        )
+        try:
+            route = await judge_task
         except Exception as exc:
+            await self._cancel_preparation(prepared_task)
+            self.busy.finish(room.room_id)
             logger.warning(f"指令行动调用全局判断LLM失败: {exc}")
             await self._send_text(event, "全局判断LLM调用失败，未执行故事行动。")
             return
         if route and not self._route_bool(route.get("reasonable"), True):
+            await self._cancel_preparation(prepared_task)
+            self.busy.finish(room.room_id)
             await self._send_text(event, self.config.unreasonable_action_message)
             return
         content_type = "non_safe" if route and str(route.get("content_type")) == "non_safe" else "regular"
+        prepared = await self._await_preparation(prepared_task)
         await self._perform_action(
             event,
             user_id,
@@ -421,7 +482,58 @@ class AIInteractiveFictionPlugin(Star):
             action,
             content_type,
             include_psychology=self._route_bool((route or {}).get("include_psychology"), False),
+            trigger_types=self._roundtable_action_triggers(route or {}, content_type),
+            prepared=prepared,
+            lock_already_held=owns_room_lock,
         )
+
+    def _start_action_preparation(
+        self,
+        room: StoryRoom | None,
+        user_id: str,
+        requested_action: str,
+        *,
+        allow_busy: bool = False,
+    ) -> asyncio.Task[PreparedStoryGeneration] | None:
+        if room is None or (self.busy.is_busy(room.room_id) and not allow_busy):
+            return None
+        action = self._resolve_command_action(room, requested_action) or requested_action.strip()
+        if not action:
+            return None
+        return asyncio.create_task(
+            self.game.prepare_action(
+                room,
+                actor_id=user_id,
+                action=action,
+                content_type="auto",
+                forbid_player_autonomy=self.config.forbid_player_autonomy,
+                include_psychology=None,
+            )
+        )
+
+    @staticmethod
+    async def _await_preparation(
+        task: asyncio.Task[PreparedStoryGeneration] | None,
+    ) -> PreparedStoryGeneration | None:
+        if task is None:
+            return None
+        try:
+            return await task
+        except asyncio.CancelledError:
+            return None
+        except Exception as exc:
+            logger.warning(f"全局故事生成LLM并发任务失败，将在生成阶段回退: {exc}")
+            return None
+
+    @staticmethod
+    async def _cancel_preparation(
+        task: asyncio.Task[PreparedStoryGeneration] | None,
+    ) -> None:
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     async def _continue_last_response(self, event: AstrMessageEvent, user_id: str) -> None:
         room = self.store.room_for_user(user_id)
@@ -538,6 +650,7 @@ class AIInteractiveFictionPlugin(Star):
                         room,
                         user_id,
                         built.public_profile,
+                        environment_context=environment_text,
                         history_key=f"first_appearance:{user_id}",
                     )
                 )
@@ -610,7 +723,8 @@ class AIInteractiveFictionPlugin(Star):
                 joined_turn=target.turn,
                 last_origin=event.unified_msg_origin,
             )
-            target.latest_discussion = list(built.discussion)
+            if built.discussion:
+                target.latest_discussion = list(built.discussion)
             if event.unified_msg_origin not in target.origins:
                 target.origins.append(event.unified_msg_origin)
             target.last_active_at = time.time()
@@ -633,6 +747,7 @@ class AIInteractiveFictionPlugin(Star):
                         target,
                         user_id,
                         built.public_profile,
+                        environment_context=environment_text,
                         history_key=f"first_appearance:{user_id}",
                     )
                 )
@@ -772,9 +887,12 @@ class AIInteractiveFictionPlugin(Star):
         content_type: str,
         *,
         include_psychology: bool,
+        trigger_types: set[str] | None = None,
+        prepared: PreparedStoryGeneration | None = None,
+        lock_already_held: bool = False,
     ) -> None:
         room_id = room.room_id
-        if not self.busy.try_begin(room_id):
+        if not lock_already_held and not self.busy.try_begin(room_id):
             await self._send_text(event, "已有玩家的行动正在处理中，请等待故事回复")
             return
         owns_room_lock = True
@@ -794,11 +912,14 @@ class AIInteractiveFictionPlugin(Star):
                 content_type=content_type,
                 forbid_player_autonomy=self.config.forbid_player_autonomy,
                 include_psychology=include_psychology,
+                trigger_types=trigger_types,
+                prepared=prepared,
             )
             room.turn += 1
             room.last_active_at = time.time()
             room.world_state = result.state_summary or room.world_state
-            room.latest_discussion = result.discussion
+            if result.discussion:
+                room.latest_discussion = result.discussion
             room.current_choices = [] if result.death or result.story_ended else result.choices
             room.conversation_character_id = (
                 "" if result.death or result.story_ended else result.conversation_character_id
@@ -911,6 +1032,7 @@ class AIInteractiveFictionPlugin(Star):
         character_id: str,
         character: dict[str, Any],
         *,
+        environment_context: str = "",
         response_turn: int | None = None,
         history_key: str = "",
     ) -> bool:
@@ -920,6 +1042,12 @@ class AIInteractiveFictionPlugin(Star):
                 bible=room.bible,
                 character=character,
                 output_dir=self._room_image_dir(room.room_id),
+                event_context=(
+                    f"首次登场。当前可见环境：{environment_context}"
+                    if environment_context.strip()
+                    else "首次登场"
+                ),
+                environment_context=environment_context,
             )
         except Exception as exc:
             logger.warning(f"首次登场立绘生成失败: {exc}")
@@ -1285,6 +1413,23 @@ class AIInteractiveFictionPlugin(Star):
             return value.strip().lower() not in {"false", "0", "no", "否"}
         return default if value is None else bool(value)
 
+    @classmethod
+    def _roundtable_action_triggers(
+        cls,
+        route: dict[str, Any],
+        content_type: str,
+    ) -> set[str]:
+        triggers: set[str] = set()
+        if content_type == "non_safe":
+            triggers.add("non_safe")
+        if cls._route_bool(route.get("requests_story_change"), False):
+            triggers.add("story_change_request")
+        elif str(route.get("action_level") or "normal") == "high_risk_complex":
+            triggers.add("high_risk_complex_action")
+        else:
+            triggers.add("normal_action")
+        return triggers
+
     @staticmethod
     def _valid_slot(value: Any) -> bool:
         try:
@@ -1328,7 +1473,7 @@ class AIInteractiveFictionPlugin(Star):
         normalized = text.replace("／", "/").strip()
         if re.fullmatch(r"/故事\s*", normalized):
             return {"name": "help"}
-        story_match = re.match(r"^/故事\s*(开始|加入|结束|继续)(.*)$", normalized, re.DOTALL)
+        story_match = re.match(r"^/故事\s*(开始|加入|结束)(.*)$", normalized, re.DOTALL)
         if story_match:
             action = story_match.group(1)
             rest = story_match.group(2).strip()
@@ -1336,8 +1481,6 @@ class AIInteractiveFictionPlugin(Star):
                 return {"name": "start", "args": rest}
             if action == "结束":
                 return {"name": "end"}
-            if action == "继续":
-                return {"name": "continue"}
             owner_match = re.search(r"(?:@|\[At:)(\d+)", rest)
             owner_id = owner_match.group(1) if owner_match else ""
             args = re.sub(r"(?:@|\[At:)\d+\]?", "", rest).strip()
@@ -1350,6 +1493,8 @@ class AIInteractiveFictionPlugin(Star):
             }
         if re.fullmatch(r"/圆桌会议\s*", normalized):
             return {"name": "roundtable"}
+        if re.fullmatch(r"/查看故事\s*", normalized):
+            return {"name": "view_story"}
         action_match = re.match(r"^/故事\s+(.+)$", normalized, re.DOTALL)
         if action_match:
             return {"name": "action", "args": action_match.group(1).strip()}

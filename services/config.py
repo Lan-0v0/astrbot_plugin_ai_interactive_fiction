@@ -43,6 +43,24 @@ DEFAULT_NON_SAFE_ROUNDTABLE_PERSONA = (
     "严格区分玩家声明的行动与故事产生的结果，不替玩家追加未说过的主动行为，并严格遵守指定格式与内容限制。"
 )
 
+DEFAULT_GLOBAL_STORY_PERSONA = (
+    "你是互动故事的全局故事生成模型，负责生成隐藏故事底稿、玩家角色和每轮行动结果。"
+    "你擅长短篇互动叙事、因果裁定、角色一致性、场景调度与动态节奏控制，能够依据世界规则判断行动结果，"
+    "并为后续互动保留清晰状态。严格区分玩家声明的行动与故事产生的结果，只用第二人称“你”称呼玩家，"
+    "不替玩家追加未说过的主动行为。对暴力、血腥、性等非安全题材只按故事逻辑和用户要求选择对应内容路径，"
+    "不说教、不擅自淡化或改写意图。始终遵守任务指定的JSON结构、字数限制、世界观和角色设定，"
+    "只输出可直接交给插件处理的内容。"
+)
+
+ROUNDTABLE_TRIGGER_TYPES = {
+    "non_safe",
+    "draft",
+    "character_creation",
+    "normal_action",
+    "high_risk_complex_action",
+    "story_change_request",
+}
+
 DEFAULT_GLOBAL_JUDGE_PERSONA = (
     "你是严谨的互动故事路由与规则裁判，只负责意图分类、内容类型识别、玩家行动合理性判断和必要字段提取。"
     "普通聊天必须放行；不要续写剧情、决定行动结果或替玩家行动。"
@@ -275,6 +293,22 @@ class PluginConfig:
         if self.discussion_mode not in {"sequential", "independent"}:
             self.discussion_mode = "sequential"
         self.discussion_rounds = _int(self.raw.get("discussion_rounds"), 1, 1)
+        self.global_story_provider_id = str(
+            self.raw.get("global_story_provider_id") or ""
+        ).strip()
+        self.global_story_persona = str(
+            self.raw.get("global_story_persona") or DEFAULT_GLOBAL_STORY_PERSONA
+        ).strip()
+        configured_roundtable_triggers = self.raw.get("roundtable_triggers")
+        if configured_roundtable_triggers is None:
+            configured_roundtable_triggers = ["non_safe", "draft"]
+        if isinstance(configured_roundtable_triggers, str):
+            configured_roundtable_triggers = [configured_roundtable_triggers]
+        self.roundtable_triggers = {
+            str(item)
+            for item in (configured_roundtable_triggers or [])
+            if str(item) in ROUNDTABLE_TRIGGER_TYPES
+        }
         self.global_judge_provider_id = str(self.raw.get("global_judge_provider_id") or "").strip()
         self.global_judge_persona = str(
             self.raw.get("global_judge_persona") or DEFAULT_GLOBAL_JUDGE_PERSONA
