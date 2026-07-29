@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,7 +13,12 @@ import aiohttp
 from .config import ImageGeneratorConfig, WorkflowNodeMapping
 from .llm import LLMService
 from .prompts import image_prompt_task, scene_image_prompt_task
-from .workflows import ComfyUIRunner, ImageGenerationError
+from .workflows import (
+    MAX_IMAGE_BYTES,
+    ComfyUIRunner,
+    ImageGenerationError,
+    read_image_response,
+)
 
 
 @dataclass(slots=True)
@@ -139,15 +145,21 @@ class OpenAIImageRunner:
             raise ImageGenerationError("图片API响应缺少data")
         item = items[0]
         if item.get("b64_json"):
+            encoded = "".join(str(item["b64_json"]).split())
+            if len(encoded) > ((MAX_IMAGE_BYTES + 2) // 3) * 4:
+                raise ImageGenerationError("生成图片超过32MB限制")
             try:
-                return base64.b64decode(str(item["b64_json"]))
-            except ValueError as exc:
+                content = base64.b64decode(encoded, validate=True)
+            except (ValueError, binascii.Error) as exc:
                 raise ImageGenerationError("图片API返回无效base64") from exc
+            if not content:
+                raise ImageGenerationError("生成图片内容为空")
+            return content
         if item.get("url"):
             async with session.get(str(item["url"])) as response:
                 if response.status != 200:
                     raise ImageGenerationError(f"下载生成图片失败: HTTP {response.status}")
-                return await response.read()
+                return await read_image_response(response)
         raise ImageGenerationError("图片API响应中没有图片")
 
     @staticmethod
@@ -175,6 +187,9 @@ class ImageService:
         self.logger = logger
         self.openai = OpenAIImageRunner()
         self.comfyui = ComfyUIRunner()
+
+    def has_enabled_generators(self) -> bool:
+        return any(generator.enabled for generator in self.generators)
 
     def _candidates(self, *, mode: str, non_safe: bool) -> list[ImageGeneratorConfig]:
         candidates: list[ImageGeneratorConfig] = []
@@ -228,6 +243,8 @@ class ImageService:
                     system_prompt="你是专业的角色图像提示词工程师。保持人物身份和视觉一致性。",
                     timeout_seconds=timeout,
                 )
+                if not prompt.strip():
+                    raise ImageGenerationError(f"{generator.name}的提示词生成模型返回空内容")
                 prompt = apply_art_style(prompt, generator.style)
                 if generator.kind == "openai":
                     path = await self.openai.generate(
@@ -276,6 +293,8 @@ class ImageService:
                     system_prompt="你是专业的场景图像提示词工程师。只描绘当前可见环境。",
                     timeout_seconds=timeout,
                 )
+                if not prompt.strip():
+                    raise ImageGenerationError(f"{generator.name}的提示词生成模型返回空内容")
                 prompt = apply_art_style(prompt, generator.style)
                 if generator.kind == "openai":
                     path = await self.openai.generate(

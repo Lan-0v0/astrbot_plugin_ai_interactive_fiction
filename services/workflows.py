@@ -17,6 +17,23 @@ class ImageGenerationError(RuntimeError):
     pass
 
 
+MAX_IMAGE_BYTES = 32 * 1024 * 1024
+
+
+async def read_image_response(response: aiohttp.ClientResponse) -> bytes:
+    declared = response.content_length
+    if declared is not None and declared > MAX_IMAGE_BYTES:
+        raise ImageGenerationError("生成图片超过32MB限制")
+    content = bytearray()
+    async for chunk in response.content.iter_chunked(64 * 1024):
+        content.extend(chunk)
+        if len(content) > MAX_IMAGE_BYTES:
+            raise ImageGenerationError("生成图片超过32MB限制")
+    if not content:
+        raise ImageGenerationError("生成图片内容为空")
+    return bytes(content)
+
+
 def set_dot_path(container: Any, path: str, value: Any) -> None:
     segments = [segment for segment in path.strip().split(".") if segment]
     if not segments:
@@ -54,6 +71,8 @@ def merge_workflow(
     if not isinstance(payload, dict):
         raise ImageGenerationError(f"工作流「{generator.name}」内容必须是JSON对象")
     payload = copy.deepcopy(payload)
+    prompt_mapped = False
+    image_mapped = False
     for mapping in mappings:
         if mapping.workflow_id != generator.name:
             continue
@@ -62,10 +81,12 @@ def merge_workflow(
             raise ImageGenerationError(f"工作流「{generator.name}」未找到节点 {mapping.node_id}")
         if mapping.content_type == "positive_prompt":
             value = prompt
+            prompt_mapped = True
         elif mapping.content_type == "image_input":
             if not uploaded_image:
                 continue
             value = uploaded_image
+            image_mapped = True
         else:
             continue
         try:
@@ -74,6 +95,10 @@ def merge_workflow(
             raise ImageGenerationError(
                 f"工作流「{generator.name}」节点 {mapping.node_id} 字段路径 {mapping.field_path} 无效: {exc}"
             ) from exc
+    if not prompt_mapped:
+        raise ImageGenerationError(f"工作流「{generator.name}」缺少正向提示词节点映射")
+    if uploaded_image and not image_mapped:
+        raise ImageGenerationError(f"工作流「{generator.name}」缺少图像输入节点映射")
     return payload
 
 
@@ -173,7 +198,7 @@ class ComfyUIRunner:
         async with session.get(f"{base_url}/view", params=params) as response:
             if response.status != 200:
                 raise ImageGenerationError(f"ComfyUI下载图片失败: HTTP {response.status}")
-            return await response.read()
+            return await read_image_response(response)
 
     @staticmethod
     def _save_bytes(content: bytes, output_dir: Path, prefix: str) -> Path:
@@ -181,4 +206,3 @@ class ComfyUIRunner:
         path = output_dir / f"{prefix}_{uuid.uuid4().hex}.png"
         path.write_bytes(content)
         return path
-

@@ -1,7 +1,7 @@
 {
   "enable_natural_language": {
     "description": "启用自然语言",
-    "hint": "关闭后只响应插件指令，自然语言开始、加入、存读档和游玩行为全部停用",
+    "hint": "仅在进入故事、待选故事或因回档需要重新加入时生效；未开局消息不调用判断模型，开始和首次加入请使用指令",
     "type": "bool",
     "default": true,
     "obvious_hint": true

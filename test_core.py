@@ -22,7 +22,7 @@ from services.config import (
     WordLimits,
     WorkflowNodeMapping,
 )
-from services.game import GameService
+from services.game import GameService, _choice_list, _is_action_payload
 from services.images import ImageService, apply_art_style
 from services.llm import GlobalJudge, LLMService, parse_json_object
 from services.memory import MemoryService
@@ -30,12 +30,13 @@ from services.models import RoomMember, StoryRoom
 from services.prompts import action_task
 from services.roundtable import (
     RoundtableConfigurationError,
+    RoundtableGenerationError,
     RoundtableOutput,
     RoundtableService,
 )
 from services.saves import SaveService
 from services.storage import RoomBusyRegistry, StateStore
-from services.workflows import merge_workflow, set_dot_path
+from services.workflows import ImageGenerationError, merge_workflow, set_dot_path
 
 
 ROOT = Path(__file__).resolve().parent
@@ -296,6 +297,24 @@ class SaveTests(unittest.TestCase):
         self.assertEqual(self.store.rewound_users["late"], self.room.room_id)
         self.assertEqual(restored.last_active_at, 99)
 
+    def test_load_does_not_restore_departed_player_state(self) -> None:
+        self.room.members["departed"] = RoomMember("departed", "departed", {}, 0, "origin")
+        self.room.dead_users.append("departed")
+        self.room.portraits["departed"] = {"path": "old.png", "prompt": "old"}
+        self.room.conversation_character_id = "departed"
+        self.store.player_rooms["departed"] = self.room.room_id
+        self.service.save_manual("owner", self.room, 1)
+        self.room.members.pop("departed")
+        self.store.player_rooms.pop("departed")
+
+        restored, removed = self.service.load("owner", self.room, 1)
+
+        self.assertEqual(removed, [])
+        self.assertNotIn("departed", restored.members)
+        self.assertNotIn("departed", restored.dead_users)
+        self.assertNotIn("departed", restored.portraits)
+        self.assertEqual(restored.conversation_character_id, "")
+
     def test_latest_load_includes_auto_slot(self) -> None:
         manual = self.service.save_manual("owner", self.room, 1)
         manual.created_at = 1
@@ -318,6 +337,44 @@ class SaveTests(unittest.TestCase):
         self.assertNotIn("owner", self.store.player_rooms)
 
 
+class StorageTests(unittest.TestCase):
+    def test_load_skips_malformed_rooms_and_save_records(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            good_room = make_room()
+            payload = {
+                "rooms": {
+                    "room-1": good_room.to_dict(),
+                    "broken": {**good_room.to_dict(), "turn": "not-a-number"},
+                    "ownerless": {**good_room.to_dict(), "owner_id": "missing"},
+                },
+                "saves": {
+                    "owner": {
+                        "1": {
+                            "room_id": "room-1",
+                            "user_id": "owner",
+                            "slot": "1",
+                            "created_at": "bad-time",
+                            "snapshot": {},
+                        }
+                    }
+                },
+                "rewound_users": {"ghost": "missing-room"},
+            }
+            (data_dir / "state.json").write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            store = StateStore(data_dir)
+
+            store._load_sync()
+
+            self.assertEqual(set(store.rooms), {"room-1"})
+            self.assertEqual(store.player_rooms, {"owner": "room-1"})
+            self.assertEqual(store.saves, {})
+            self.assertEqual(store.rewound_users, {})
+
+
 class WorkflowTests(unittest.TestCase):
     def test_dot_path_and_workflow_mapping(self) -> None:
         data = {"inputs": {"texts": ["old"]}}
@@ -335,6 +392,21 @@ class WorkflowTests(unittest.TestCase):
         mapping = WorkflowNodeMapping("prompt", "wf", "6", "inputs.text", "positive_prompt")
         merged = merge_workflow(generator, [mapping], prompt="new")
         self.assertEqual(merged["6"]["inputs"]["text"], "new")
+
+    def test_workflow_requires_prompt_and_edit_image_mappings(self) -> None:
+        generator = ImageGeneratorConfig(
+            kind="comfyui",
+            name="wf",
+            enabled=True,
+            priority=1,
+            prompt_provider_id="p",
+            raw={"workflow_content": json.dumps({"6": {"inputs": {"text": "old"}}})},
+        )
+        with self.assertRaisesRegex(ImageGenerationError, "正向提示词"):
+            merge_workflow(generator, [], prompt="new")
+        prompt_mapping = WorkflowNodeMapping("prompt", "wf", "6", "inputs.text", "positive_prompt")
+        with self.assertRaisesRegex(ImageGenerationError, "图像输入"):
+            merge_workflow(generator, [prompt_mapping], prompt="new", uploaded_image="input.png")
 
     def test_image_candidates_route_non_safe_edits_to_free_or_comfyui(self) -> None:
         generators = [
@@ -521,17 +593,19 @@ class StructuredOutputTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FakeRoundtable:
-    def __init__(self, payload: dict) -> None:
+    def __init__(self, payload: dict, discussion: list[dict[str, str]] | None = None) -> None:
         self.payload = payload
+        self.discussion = discussion or []
         self.calls: list[dict] = []
 
     async def run(self, task: str, **kwargs) -> RoundtableOutput:
         self.calls.append({"task": task, **kwargs})
-        return RoundtableOutput(json.dumps(self.payload, ensure_ascii=False), [])
+        return RoundtableOutput(json.dumps(self.payload, ensure_ascii=False), self.discussion)
 
 
 class GameTests(unittest.IsolatedAsyncioTestCase):
     async def test_random_story_runtime_fields_are_built_from_roundtable(self) -> None:
+        discussion = [{"label": "model", "content": "proposal"}]
         roundtable = FakeRoundtable(
             {
                 "story_bible": {"title": "随机故事"},
@@ -540,7 +614,8 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
                 "opening_state": "醒来",
                 "opening_choices": ["观察", "等待", "前进"],
                 "runtime": {"expected_minutes": 26, "save_enabled": True},
-            }
+            },
+            discussion,
         )
         game = GameService(roundtable, object())
         built = await game.build_story(
@@ -554,7 +629,31 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(built.story.save_enabled)
         self.assertEqual(built.opening_state, "醒来")
         self.assertEqual(built.opening_choices, ["观察", "等待", "前进"])
+        self.assertEqual(built.discussion, discussion)
+        room = game.create_room("owner", "玩家", "origin", built)
+        self.assertEqual(room.latest_discussion, discussion)
         self.assertIn("主角是女性", roundtable.calls[0]["task"])
+
+    async def test_join_character_keeps_roundtable_discussion(self) -> None:
+        discussion = [{"label": "reviewer", "content": "character"}]
+        roundtable = FakeRoundtable(
+            {
+                "public_player_profile": {"name": "新玩家"},
+                "private_player_profile": {"secret": "x"},
+            },
+            discussion,
+        )
+        game = GameService(roundtable, object())
+        room = make_room()
+
+        built = await game.build_join_character(
+            room,
+            requirements="",
+            player_name="新玩家",
+            content_type="regular",
+        )
+
+        self.assertEqual(built.discussion, discussion)
 
 
 class RoundtableTests(unittest.IsolatedAsyncioTestCase):
@@ -590,9 +689,9 @@ class RoundtableTests(unittest.IsolatedAsyncioTestCase):
             RoundtableModelConfig("r", True, 1, "reviewer", "regular", "r", "", -1),
         ]
         llm = FailingProposalLLM()
-        output = await RoundtableService(llm, models, mode="sequential", rounds=2, logger=Logger()).run("task")
-        self.assertEqual(llm.calls, ["p1", "p2", "r"])
-        self.assertEqual(output.final_text, "output-r")
+        with self.assertRaisesRegex(RoundtableGenerationError, "生成失败"):
+            await RoundtableService(llm, models, mode="sequential", rounds=2, logger=Logger()).run("task")
+        self.assertEqual(llm.calls, ["p1", "p2"])
 
     async def test_missing_role_configuration_is_reported(self) -> None:
         models = [RoundtableModelConfig("p", True, 1, "proposal", "regular", "p", "", -1)]
@@ -782,6 +881,17 @@ class PromptTests(unittest.TestCase):
         self.assertTrue(parsed.major_node)
         self.assertEqual(parsed.conversation_character_id, "npc-1")
 
+    def test_structured_actions_reject_non_string_choices_and_narrative(self) -> None:
+        self.assertEqual(_choice_list(["前进", {"action": "返回"}, 3, "观察"]), ["前进", "观察"])
+        self.assertFalse(
+            _is_action_payload(
+                json.dumps(
+                    {"narrative": {"text": "结果"}, "choices": ["一", "二", "三"]},
+                    ensure_ascii=False,
+                )
+            )
+        )
+
 
 class NewFeatureTests(unittest.TestCase):
     def test_image_trigger_defaults_and_explicit_empty_disable(self) -> None:
@@ -798,6 +908,11 @@ class NewFeatureTests(unittest.TestCase):
             },
         )
         self.assertEqual(PluginConfig({"image_generation_triggers": []}).image_generation_triggers, set())
+
+    def test_disabled_image_entries_skip_background_judgment_gate(self) -> None:
+        disabled = ImageGeneratorConfig("openai", "off", False, 50, "prompt", {})
+        service = ImageService(FakeLLM(), [disabled], [], default_timeout=300, logger=Logger())
+        self.assertFalse(service.has_enabled_generators())
 
 
 

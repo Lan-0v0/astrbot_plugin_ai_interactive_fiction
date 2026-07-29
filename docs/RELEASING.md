@@ -5,10 +5,9 @@
 ## 发布前
 
 1. 修改 `metadata.yaml` 中的 `version`。
-2. 修改 `main.py` 中 `@register` 的版本参数。
-3. 在 `CHANGELOG.md` 顶部增加对应版本。
-4. 新增 `docs/releases/vX.Y.Z.md`。
-5. 运行验证：
+2. 在 `CHANGELOG.md` 顶部增加对应版本。
+3. 新增 `docs/releases/vX.Y.Z.md`。
+4. 运行验证：
 
 ```powershell
 python -B -m unittest -v test_core test_astrbot_integration
@@ -21,14 +20,14 @@ python scripts/validate_release.py
 提交所有变更后创建并推送标签：
 
 ```powershell
-git tag -a v0.1.0 -m "v0.1.0"
+git tag -a v0.1.1 -m "v0.1.1"
 git push origin main
-git push origin v0.1.0
+git push origin v0.1.1
 ```
 
 标签会触发 `.github/workflows/release.yml`：
 
-1. 校验标签、`metadata.yaml` 和 `@register` 版本一致。
+1. 校验标签与 `metadata.yaml` 版本一致。
 2. 执行单元测试和 Python 编译检查。
 3. 只打包插件运行所需文件，排除测试、脚本、仓库配置和缓存。
 4. 检查 ZIP 不超过 AstrBot 插件市场要求的 16 MB。
@@ -57,3 +56,7 @@ GitHub Release 成功后，前往 [AstrBot 插件发布页面](https://cloud.ast
 ## v0.1.0
 
 自然语言作用域、指令行动、回复续发、固定选项与后台多时机生图的发布说明见 [v0.1.0](releases/v0.1.0.md)。
+
+## v0.1.1
+
+完整审查、圆桌记录、回档重入与健壮性修复版本的发布说明见 [v0.1.1](releases/v0.1.1.md)。

@@ -117,6 +117,9 @@ class RoundtableService:
                 if len(proposal_context) == successes_before:
                     break
 
+        if not proposal_context:
+            raise RoundtableGenerationError("生成失败，请配置或检查模型")
+
         review_context = list(proposal_context)
         final_text = ""
         reviewer_success = False

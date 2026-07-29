@@ -33,24 +33,14 @@ def metadata_scalar(text: str, key: str) -> str:
     return match.group(1).strip().strip('"\'')
 
 
-def registered_values(source: str) -> tuple[str, str]:
+def plugin_name(source: str) -> str:
     tree = ast.parse(source, filename="main.py")
-    plugin_name = ""
-    register_version = ""
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             if any(isinstance(target, ast.Name) and target.id == "PLUGIN_NAME" for target in node.targets):
                 if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-                    plugin_name = node.value.value
-        if not isinstance(node, ast.Call):
-            continue
-        if not isinstance(node.func, ast.Name) or node.func.id != "register":
-            continue
-        if len(node.args) >= 4 and isinstance(node.args[3], ast.Constant):
-            register_version = str(node.args[3].value)
-    if not plugin_name or not register_version:
-        raise ValueError("main.py 缺少可识别的 PLUGIN_NAME 或 @register 版本")
-    return plugin_name, register_version
+                    return node.value.value
+    raise ValueError("main.py 缺少可识别的 PLUGIN_NAME")
 
 
 def runtime_size() -> int:
@@ -77,14 +67,12 @@ def validate(tag: str | None) -> None:
     metadata_name = metadata_scalar(metadata_text, "name")
     metadata_version = metadata_scalar(metadata_text, "version")
     repository = metadata_scalar(metadata_text, "repo")
-    plugin_name, register_version = registered_values(main_source)
+    source_plugin_name = plugin_name(main_source)
 
-    if metadata_name != plugin_name:
-        raise ValueError(f"插件名称不一致: metadata={metadata_name}, main={plugin_name}")
+    if metadata_name != source_plugin_name:
+        raise ValueError(f"插件名称不一致: metadata={metadata_name}, main={source_plugin_name}")
     if not SEMVER.fullmatch(metadata_version):
         raise ValueError(f"版本不是语义化版本: {metadata_version}")
-    if metadata_version != register_version:
-        raise ValueError(f"版本不一致: metadata={metadata_version}, @register={register_version}")
     if repository != EXPECTED_REPOSITORY:
         raise ValueError(f"仓库地址与插件名称不匹配: {repository}")
     if not re.search(r"(?ms)^support_platforms:\s*\n(?:\s+-\s+.*\n)*?\s+-\s+aiocqhttp\s*$", metadata_text):
@@ -104,7 +92,7 @@ def validate(tag: str | None) -> None:
     size = runtime_size()
     if size > MAX_ARCHIVE_BYTES:
         raise ValueError(f"运行文件超过 AstrBot 16 MB 限制: {size} bytes")
-    print(f"release metadata valid: {plugin_name} v{metadata_version}, runtime files {size} bytes")
+    print(f"release metadata valid: {source_plugin_name} v{metadata_version}, runtime files {size} bytes")
 
 
 def main() -> None:

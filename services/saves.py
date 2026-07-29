@@ -59,6 +59,17 @@ class SaveService:
             for member_id, member in restored.members.items()
             if member_id in current_member_ids
         }
+        valid_character_ids = set(restored.members) | set(restored.known_characters)
+        restored.dead_users = [
+            member_id for member_id in restored.dead_users if member_id in restored.members
+        ]
+        restored.portraits = {
+            character_id: portrait
+            for character_id, portrait in restored.portraits.items()
+            if character_id in valid_character_ids
+        }
+        if restored.conversation_character_id not in valid_character_ids:
+            restored.conversation_character_id = ""
         for member_id in removed:
             self.store.player_rooms.pop(member_id, None)
             self.store.rewound_users[member_id] = room.room_id

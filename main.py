@@ -11,7 +11,7 @@ from typing import Any
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import At, Plain
-from astrbot.api.star import Context, Star, StarTools, register
+from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.message.message_event_result import MessageChain
 
 from .services.config import PluginConfig, StoryConfig
@@ -53,12 +53,6 @@ CG_FAILED_TEXT = "CG生成失败，请配置或检查模型"
 GENERATION_FAILED_TEXT = "生成失败，请配置或检查模型"
 
 
-@register(
-    PLUGIN_NAME,
-    "Lan",
-    "基于多模型圆桌会议的单人及群聊互动故事插件",
-    "0.1.0",
-)
 class AIInteractiveFictionPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
@@ -192,7 +186,11 @@ class AIInteractiveFictionPlugin(Star):
             return
         await self._cleanup_if_due()
         room = self.store.room_for_user(user_id)
-        if room is None and user_id not in self.store.pending_starts:
+        if (
+            room is None
+            and user_id not in self.store.pending_starts
+            and user_id not in self.store.rewound_users
+        ):
             yield "请先使用 /故事 开始 进入故事；未开局时不会调用自然语言判断。"
             return
         story = StoryConfig.from_runtime_dict(room.story_config) if room else None
@@ -235,7 +233,11 @@ class AIInteractiveFictionPlugin(Star):
             return
 
         room = self.store.room_for_user(user_id)
-        if room is None and user_id not in self.store.pending_starts:
+        if (
+            room is None
+            and user_id not in self.store.pending_starts
+            and user_id not in self.store.rewound_users
+        ):
             return
         story = StoryConfig.from_runtime_dict(room.story_config) if room else None
         try:
@@ -291,6 +293,9 @@ class AIInteractiveFictionPlugin(Star):
             await self._continue_last_response(event, user_id)
             return
         if name == "action":
+            if user_id in self.store.pending_starts:
+                await self._select_pending_story(event, user_id, str(command.get("args") or ""))
+                return
             await self._perform_command_action(event, user_id, str(command.get("args") or ""))
             return
         if name in {"save", "load"}:
@@ -323,10 +328,14 @@ class AIInteractiveFictionPlugin(Star):
             await self._select_pending_story(event, user_id, str(route.get("story_choice") or text))
             return
         if intent == "join":
-            if room is None:
+            rewound_room_id = self.store.rewound_users.get(user_id, "")
+            if room is None and not rewound_room_id:
                 return
             event.stop_event()
             owner_id = self._mentioned_owner(event) or str(route.get("owner_id") or "")
+            if not owner_id and rewound_room_id:
+                rewound_room = self.store.rooms.get(rewound_room_id)
+                owner_id = rewound_room.owner_id if rewound_room is not None else ""
             await self._join_room(event, user_id, owner_id, str(route.get("requirements") or ""))
             return
         if intent == "end":
@@ -380,6 +389,9 @@ class AIInteractiveFictionPlugin(Star):
         room = self.store.room_for_user(user_id)
         if room is None:
             await self._send_text(event, REWOUND_TEXT if user_id in self.store.rewound_users else "你当前不在故事房间内")
+            return
+        if self.busy.is_busy(room.room_id):
+            await self._send_text(event, "已有玩家的行动正在处理中，请等待故事回复")
             return
         action = self._resolve_command_action(room, requested_action)
         if not action:
@@ -598,6 +610,7 @@ class AIInteractiveFictionPlugin(Star):
                 joined_turn=target.turn,
                 last_origin=event.unified_msg_origin,
             )
+            target.latest_discussion = list(built.discussion)
             if event.unified_msg_origin not in target.origins:
                 target.origins.append(event.unified_msg_origin)
             target.last_active_at = time.time()
@@ -807,7 +820,11 @@ class AIInteractiveFictionPlugin(Star):
                 room.dead_users.append(user_id)
             for character in result.new_characters:
                 character_id = str(character.get("id") or character.get("name") or "").strip()
-                if character_id:
+                if (
+                    character_id
+                    and character_id not in room.members
+                    and character_id not in room.known_characters
+                ):
                     room.known_characters[character_id] = character
             for changed in result.changed_characters:
                 character_id = str(changed.get("id") or "").strip()
@@ -843,19 +860,31 @@ class AIInteractiveFictionPlugin(Star):
                 await self.store.save()
 
             text_sent = asyncio.Event()
-            if not result.story_ended:
-                self._spawn_background(
+            image_task: asyncio.Task[Any] | None = None
+            if (
+                not result.story_ended
+                and self.config.image_generation_triggers
+                and self.images.has_enabled_generators()
+            ):
+                image_task = self._spawn_background(
                     self._detect_and_handle_action_images(
                         event,
                         room_id=room.room_id,
+                        expected_room=room,
                         expected_turn=room.turn,
                         action=action,
                         result=result,
                         text_sent=text_sent,
                     )
                 )
-            await self._send_text(event, response)
-            text_sent.set()
+            try:
+                await self._send_text(event, response)
+            except Exception:
+                if image_task is not None:
+                    image_task.cancel()
+                raise
+            finally:
+                text_sent.set()
             if result.story_ended:
                 async with self.store.lock:
                     self.store.end_room(room.room_id)
@@ -902,7 +931,7 @@ class AIInteractiveFictionPlugin(Star):
                 current
                 and (character_id in current.members or character_id in current.known_characters)
             )
-            if current and current.turn >= expected_turn and character_exists:
+            if current is room and current.turn >= expected_turn and character_exists:
                 current.portraits[character_id] = {
                     "path": str(generated.path),
                     "prompt": generated.prompt,
@@ -930,6 +959,7 @@ class AIInteractiveFictionPlugin(Star):
         event: AstrMessageEvent,
         *,
         room_id: str,
+        expected_room: StoryRoom,
         expected_turn: int,
         action: str,
         result: ActionResult,
@@ -937,7 +967,7 @@ class AIInteractiveFictionPlugin(Star):
     ) -> None:
         try:
             room = self.store.rooms.get(room_id)
-            if room is None:
+            if room is not expected_room:
                 return
             known_characters = {
                 **room.known_characters,
@@ -967,6 +997,7 @@ class AIInteractiveFictionPlugin(Star):
                 await self._handle_image_trigger(
                     event,
                     room_id=room_id,
+                    expected_room=expected_room,
                     expected_turn=expected_turn,
                     trigger=trigger,
                     result=result,
@@ -981,6 +1012,7 @@ class AIInteractiveFictionPlugin(Star):
         event: AstrMessageEvent,
         *,
         room_id: str,
+        expected_room: StoryRoom,
         expected_turn: int,
         trigger: dict[str, str],
         result: ActionResult,
@@ -999,7 +1031,11 @@ class AIInteractiveFictionPlugin(Star):
         )
         inflight_key = f"{room_id}:{history_key}"
         room = self.store.rooms.get(room_id)
-        if room is None or history_key in room.image_trigger_history or inflight_key in self._image_triggers_inflight:
+        if (
+            room is not expected_room
+            or history_key in room.image_trigger_history
+            or inflight_key in self._image_triggers_inflight
+        ):
             return
         self._image_triggers_inflight.add(inflight_key)
         succeeded = False
@@ -1010,6 +1046,9 @@ class AIInteractiveFictionPlugin(Star):
                     event_context=trigger.get("description") or result.narrative,
                     output_dir=self._room_image_dir(room_id),
                 )
+                if self.store.rooms.get(room_id) is not expected_room:
+                    self._discard_generated_path(generated.path)
+                    return
                 succeeded = await send_generated_image(event, self.context, generated.path, generated.generator)
                 if succeeded:
                     await self._cache_generated_image(room_id, expected_turn, generated)
@@ -1035,6 +1074,7 @@ class AIInteractiveFictionPlugin(Star):
                     succeeded = await self._generate_character_edit(
                         event,
                         room_id=room_id,
+                        expected_room=expected_room,
                         expected_turn=expected_turn,
                         character_id=character_id,
                         character=character,
@@ -1045,6 +1085,8 @@ class AIInteractiveFictionPlugin(Star):
                     )
             if succeeded:
                 await self._mark_image_trigger(room_id, history_key)
+            elif trigger_type in {"killing", "violation", "battle_damage"}:
+                await self._send_text(event, CG_FAILED_TEXT)
         except ImageGenerationError as exc:
             logger.warning(f"{trigger_type}图像生成失败: {exc}")
             if trigger_type in {"killing", "violation", "battle_damage"}:
@@ -1057,6 +1099,7 @@ class AIInteractiveFictionPlugin(Star):
         event: AstrMessageEvent,
         *,
         room_id: str,
+        expected_room: StoryRoom,
         expected_turn: int,
         character_id: str,
         character: dict[str, Any],
@@ -1067,7 +1110,7 @@ class AIInteractiveFictionPlugin(Star):
     ) -> bool:
         source_path = str(cached.get("path") or "")
         room = self.store.rooms.get(room_id)
-        if room is None:
+        if room is not expected_room:
             return False
         generated = await self.images.generate_character_image(
             bible=room.bible,
@@ -1080,7 +1123,10 @@ class AIInteractiveFictionPlugin(Star):
         )
         current = self.store.rooms.get(room_id)
         current_cached = current.portraits.get(character_id) if current else None
-        if current is None or str((current_cached or {}).get("path") or "") != source_path:
+        if (
+            current is not expected_room
+            or str((current_cached or {}).get("path") or "") != source_path
+        ):
             self._discard_generated_path(generated.path)
             return False
         if update_portrait:
@@ -1135,7 +1181,7 @@ class AIInteractiveFictionPlugin(Star):
             return public if isinstance(public, dict) else {}
         return {}
 
-    def _spawn_background(self, coroutine: Any) -> None:
+    def _spawn_background(self, coroutine: Any) -> asyncio.Task[Any]:
         task = asyncio.create_task(coroutine)
         self._background_tasks.add(task)
 
@@ -1151,6 +1197,7 @@ class AIInteractiveFictionPlugin(Star):
                 logger.warning(f"互动故事后台任务失败: {error}")
 
         task.add_done_callback(completed)
+        return task
 
     async def _cleanup_if_due(self, force: bool = False) -> None:
         if self.store is None:

@@ -138,6 +138,17 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
             await plugin._handle_command(event, "10001", {"name": "save", "slot": "5"})
         send.assert_awaited_once_with(event, self.module.INVALID_SLOT_TEXT)
 
+    async def test_story_action_command_selects_pending_story(self) -> None:
+        plugin = object.__new__(self.module.AIInteractiveFictionPlugin)
+        plugin.store = SimpleNamespace(pending_starts={"10001": {}})
+        plugin._select_pending_story = AsyncMock()
+        plugin._perform_command_action = AsyncMock()
+
+        await plugin._handle_command(object(), "10001", {"name": "action", "args": "1"})
+
+        plugin._select_pending_story.assert_awaited_once_with(unittest.mock.ANY, "10001", "1")
+        plugin._perform_command_action.assert_not_awaited()
+
     async def test_llm_tool_respects_natural_language_switch(self) -> None:
         plugin = object.__new__(self.module.AIInteractiveFictionPlugin)
         plugin.store = object()
@@ -149,6 +160,7 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_llm_tool_does_not_route_before_game_starts(self) -> None:
         class Store:
             pending_starts = {}
+            rewound_users = {}
 
             @staticmethod
             def room_for_user(_user_id):
@@ -174,6 +186,7 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_message_router_skips_judge_before_game_starts(self) -> None:
         class Store:
             pending_starts = {}
+            rewound_users = {}
 
             @staticmethod
             def room_for_user(_user_id):
@@ -195,6 +208,65 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
         )
         await plugin.on_message(event)
         plugin.judge.route.assert_not_awaited()
+
+    async def test_rewound_player_natural_action_gets_rejoin_notice(self) -> None:
+        class Store:
+            pending_starts = {}
+            rewound_users = {"10001": "room-1"}
+            rooms = {}
+
+            @staticmethod
+            def room_for_user(_user_id):
+                return None
+
+        plugin = object.__new__(self.module.AIInteractiveFictionPlugin)
+        plugin.store = Store()
+        plugin.saves = object()
+        plugin.config = SimpleNamespace(
+            enable_natural_language=True,
+            global_judge_provider_id="judge",
+        )
+        plugin.judge = SimpleNamespace(
+            route=AsyncMock(return_value={"intent": "action", "reasonable": True})
+        )
+        plugin._cleanup_if_due = AsyncMock()
+        plugin._send_text = AsyncMock()
+        event = SimpleNamespace(
+            stopped=False,
+            get_sender_id=lambda: "10001",
+            get_self_id=lambda: "20002",
+            get_message_str=lambda: "我继续向前走",
+            stop_event=lambda: setattr(event, "stopped", True),
+        )
+
+        await plugin.on_message(event)
+
+        self.assertTrue(event.stopped)
+        plugin.judge.route.assert_awaited_once()
+        plugin._send_text.assert_awaited_once_with(event, self.module.REWOUND_TEXT)
+
+    async def test_rewound_player_can_naturally_rejoin_original_room(self) -> None:
+        room = SimpleNamespace(owner_id="owner")
+        store = SimpleNamespace(
+            rewound_users={"10001": "room-1"},
+            rooms={"room-1": room},
+        )
+        plugin = object.__new__(self.module.AIInteractiveFictionPlugin)
+        plugin.store = store
+        plugin._mentioned_owner = MagicMock(return_value="")
+        plugin._join_room = AsyncMock()
+        event = SimpleNamespace(stop_event=MagicMock())
+
+        await plugin._handle_natural_route(
+            event,
+            "10001",
+            "重新加入",
+            {"intent": "join", "requirements": ""},
+            None,
+        )
+
+        event.stop_event.assert_called_once()
+        plugin._join_room.assert_awaited_once_with(event, "10001", "owner", "")
 
     def test_choice_format_and_numeric_resolution(self) -> None:
         from _astrbot_plugin_ai_interactive_fiction_integration.services.models import StoryRoom
@@ -318,8 +390,9 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
         plugin.saves = SimpleNamespace(auto_save=MagicMock())
         plugin.config = SimpleNamespace(
             forbid_player_autonomy=True,
-            image_generation_triggers=set(),
+            image_generation_triggers={"scene_change"},
         )
+        plugin.images = SimpleNamespace(has_enabled_generators=lambda: True)
         plugin._send_text = AsyncMock()
         spawned: list[object] = []
 
@@ -343,6 +416,34 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("4. 杀害", room.last_response["text"])
         self.assertIn("6. 可自由使用", room.last_response["text"])
         plugin._send_text.assert_awaited_once_with(event, room.last_response["text"])
+
+    async def test_command_action_checks_room_lock_before_judge(self) -> None:
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.models import StoryRoom
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.storage import RoomBusyRegistry
+
+        room = StoryRoom(
+            room_id="room-1",
+            owner_id="10001",
+            story_config={},
+            bible={},
+            members={},
+            created_at=1,
+            last_active_at=1,
+        )
+        plugin = object.__new__(self.module.AIInteractiveFictionPlugin)
+        plugin.store = SimpleNamespace(room_for_user=lambda _user_id: room, rewound_users={})
+        plugin.busy = RoomBusyRegistry()
+        plugin.busy.try_begin(room.room_id)
+        plugin.judge = SimpleNamespace(route=AsyncMock())
+        plugin._send_text = AsyncMock()
+
+        await plugin._perform_command_action(object(), "10001", "前进")
+
+        plugin.judge.route.assert_not_awaited()
+        plugin._send_text.assert_awaited_once_with(
+            unittest.mock.ANY,
+            "已有玩家的行动正在处理中，请等待故事回复",
+        )
 
     def test_roundtable_display_fields_are_chinese(self) -> None:
         plugin = object.__new__(self.module.AIInteractiveFictionPlugin)

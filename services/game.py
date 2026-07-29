@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .config import DEFAULT_CONTENT_LIMIT, StoryConfig, WordLimits
@@ -21,12 +21,14 @@ class BuiltStory:
     full_character: dict[str, Any]
     opening_state: str
     opening_choices: list[str]
+    discussion: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
 class BuiltCharacter:
     public_profile: dict[str, Any]
     full_character: dict[str, Any]
+    discussion: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -107,6 +109,7 @@ class GameService:
             full_character=full_character,
             opening_state=str(parsed.get("opening_state") or ""),
             opening_choices=_choice_list(parsed.get("opening_choices")),
+            discussion=output.discussion,
         )
 
     async def build_join_character(
@@ -143,6 +146,7 @@ class GameService:
         return BuiltCharacter(
             public_profile=public,
             full_character={"public": public, "private": private if isinstance(private, dict) else {}},
+            discussion=output.discussion,
         )
 
     async def act(
@@ -239,6 +243,7 @@ class GameService:
             last_active_at=now,
             world_state=built.opening_state,
             current_choices=list(built.opening_choices),
+            latest_discussion=list(built.discussion),
             origins=[origin],
         )
 
@@ -268,7 +273,7 @@ def _is_join_character_payload(text: str) -> bool:
 
 def _is_action_payload(text: str) -> bool:
     parsed = parse_json_object(text)
-    if not parsed or not str(parsed.get("narrative") or "").strip():
+    if not parsed or not isinstance(parsed.get("narrative"), str) or not parsed["narrative"].strip():
         return False
     if _as_bool(parsed.get("death"), False) or _as_bool(parsed.get("story_ended"), False):
         return True
@@ -278,7 +283,7 @@ def _is_action_payload(text: str) -> bool:
 def _choice_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
-    return [str(item).strip() for item in value if str(item).strip()][:3]
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()][:3]
 
 
 def _as_bool(value: Any, default: bool) -> bool:

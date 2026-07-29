@@ -35,23 +35,38 @@ class StateStore:
             raw = json.loads(self.state_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return
-        self.rooms = {
-            room_id: StoryRoom.from_dict(room)
-            for room_id, room in dict(raw.get("rooms") or {}).items()
-            if isinstance(room, dict)
-        }
-        self.player_rooms = {str(k): str(v) for k, v in dict(raw.get("player_rooms") or {}).items()}
+        if not isinstance(raw, dict):
+            return
+        self.rooms = {}
+        for room_id, room_raw in _mapping(raw.get("rooms")).items():
+            if not isinstance(room_raw, dict):
+                continue
+            try:
+                room = StoryRoom.from_dict(room_raw)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            normalized_room_id = str(room_id)
+            room.room_id = normalized_room_id
+            if not room.owner_id or room.owner_id not in room.members:
+                continue
+            self.rooms[normalized_room_id] = room
+        self.player_rooms = {str(k): str(v) for k, v in _mapping(raw.get("player_rooms")).items()}
         self.saves = {}
-        for user_id, slots in dict(raw.get("saves") or {}).items():
+        for user_id, slots in _mapping(raw.get("saves")).items():
             if isinstance(slots, dict):
-                self.saves[str(user_id)] = {
-                    str(slot): SaveRecord.from_dict(record)
-                    for slot, record in slots.items()
-                    if isinstance(record, dict)
-                }
-        self.rewound_users = {str(k): str(v) for k, v in dict(raw.get("rewound_users") or {}).items()}
+                parsed_slots: dict[str, SaveRecord] = {}
+                for slot, record_raw in slots.items():
+                    if not isinstance(record_raw, dict):
+                        continue
+                    try:
+                        parsed_slots[str(slot)] = SaveRecord.from_dict(record_raw)
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                if parsed_slots:
+                    self.saves[str(user_id)] = parsed_slots
+        self.rewound_users = {str(k): str(v) for k, v in _mapping(raw.get("rewound_users")).items()}
         self.pending_starts = {
-            str(k): dict(v) for k, v in dict(raw.get("pending_starts") or {}).items() if isinstance(v, dict)
+            str(k): dict(v) for k, v in _mapping(raw.get("pending_starts")).items() if isinstance(v, dict)
         }
         self._repair_indexes()
 
@@ -64,6 +79,12 @@ class StateStore:
         self.saves = {
             user_id: {slot: save for slot, save in slots.items() if save.room_id in self.rooms}
             for user_id, slots in self.saves.items()
+            if any(save.room_id in self.rooms for save in slots.values())
+        }
+        self.rewound_users = {
+            user_id: room_id
+            for user_id, room_id in self.rewound_users.items()
+            if room_id in self.rooms and user_id not in valid
         }
 
     def _serialize(self) -> dict[str, Any]:
@@ -152,3 +173,7 @@ class RoomBusyRegistry:
 
     def is_busy(self, room_id: str) -> bool:
         return room_id in self._busy
+
+
+def _mapping(value: Any) -> dict[Any, Any]:
+    return value if isinstance(value, dict) else {}
