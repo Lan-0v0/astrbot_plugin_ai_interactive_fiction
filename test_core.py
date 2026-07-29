@@ -647,6 +647,14 @@ class JudgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"action_level":"normal|high_risk_complex"', GlobalJudge.ROUTE_SYSTEM)
         self.assertIn('"requests_story_change":false', GlobalJudge.ROUTE_SYSTEM)
 
+    def test_route_prompt_separates_non_safe_content_from_unreasonable_actions(self) -> None:
+        self.assertIn(
+            '"unreasonable_reason":"none|physically_impossible|claims_result"',
+            GlobalJudge.ROUTE_SYSTEM,
+        )
+        self.assertIn("使用附近物体来自慰", GlobalJudge.ROUTE_SYSTEM)
+        self.assertIn("此类内容只标为non_safe，不得因此拒绝", GlobalJudge.ROUTE_SYSTEM)
+
 
 class StructuredOutputTests(unittest.IsolatedAsyncioTestCase):
     def test_json_parser_extracts_largest_balanced_object(self) -> None:

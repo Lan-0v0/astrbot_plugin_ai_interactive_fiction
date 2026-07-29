@@ -209,6 +209,11 @@ class AIInteractiveFictionPlugin(Star):
             yield "请先使用 /故事 开始 进入故事；未开局时不会调用自然语言判断。"
             return
         story = StoryConfig.from_runtime_dict(room.story_config) if room else None
+        direct_choice = self._direct_natural_choice(event, text, room)
+        if direct_choice:
+            await self._perform_command_action(event, user_id, direct_choice)
+            yield "互动故事操作已执行，结果已直接发送给用户，无需重复回复。"
+            return
         prepared_task = self._start_action_preparation(room, user_id, text)
         try:
             route = await self.judge.route(
@@ -263,6 +268,11 @@ class AIInteractiveFictionPlugin(Star):
             and user_id not in self.store.pending_starts
             and user_id not in self.store.rewound_users
         ):
+            return
+        direct_choice = self._direct_natural_choice(event, text, room)
+        if direct_choice:
+            event.stop_event()
+            await self._perform_command_action(event, user_id, direct_choice)
             return
         story = StoryConfig.from_runtime_dict(room.story_config) if room else None
         prepared_task = self._start_action_preparation(room, user_id, text)
@@ -403,7 +413,7 @@ class AIInteractiveFictionPlugin(Star):
                 await self._send_text(event, REWOUND_TEXT)
             return
         event.stop_event()
-        if not self._route_bool(route.get("reasonable"), True):
+        if not self._route_action_is_reasonable(route):
             await self._cancel_preparation(prepared_task)
             await self._send_text(event, self.config.unreasonable_action_message)
             return
@@ -468,7 +478,7 @@ class AIInteractiveFictionPlugin(Star):
             logger.warning(f"指令行动调用全局判断LLM失败: {exc}")
             await self._send_text(event, "全局判断LLM调用失败，未执行故事行动。")
             return
-        if route and not self._route_bool(route.get("reasonable"), True):
+        if route and not self._route_action_is_reasonable(route):
             await self._cancel_preparation(prepared_task)
             self.busy.finish(room.room_id)
             await self._send_text(event, self.config.unreasonable_action_message)
@@ -1405,6 +1415,38 @@ class AIInteractiveFictionPlugin(Star):
             return f"{cleaned}正在交谈的角色（ID：{room.conversation_character_id}）"
         return cleaned
 
+    @classmethod
+    def _direct_natural_choice(
+        cls,
+        event: AstrMessageEvent,
+        text: str,
+        room: StoryRoom | None,
+    ) -> str:
+        if room is None:
+            return ""
+        candidates = [str(text or "").strip()]
+        try:
+            plain_text = "".join(
+                str(component.text)
+                for component in event.get_messages()
+                if isinstance(component, Plain)
+            ).strip()
+        except (AttributeError, TypeError):
+            plain_text = ""
+        if plain_text and plain_text not in candidates:
+            candidates.append(plain_text)
+
+        digits = {"一": "1", "二": "2", "三": "3", "四": "4", "五": "5"}
+        pattern = re.compile(r"^(?:(?:选|选择)\s*|第\s*)?([1-5一二三四五])\s*(?:项)?$")
+        for candidate in candidates:
+            match = pattern.fullmatch(candidate)
+            if not match:
+                continue
+            option = digits.get(match.group(1), match.group(1))
+            if cls._resolve_command_action(room, option):
+                return option
+        return ""
+
     @staticmethod
     def _route_bool(value: Any, default: bool) -> bool:
         if isinstance(value, bool):
@@ -1412,6 +1454,15 @@ class AIInteractiveFictionPlugin(Star):
         if isinstance(value, str):
             return value.strip().lower() not in {"false", "0", "no", "否"}
         return default if value is None else bool(value)
+
+    @classmethod
+    def _route_action_is_reasonable(cls, route: dict[str, Any]) -> bool:
+        reason = str(route.get("unreasonable_reason") or "").strip().lower()
+        if reason == "none":
+            return True
+        if reason in {"physically_impossible", "claims_result"}:
+            return False
+        return cls._route_bool(route.get("reasonable"), True)
 
     @classmethod
     def _roundtable_action_triggers(

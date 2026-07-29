@@ -186,6 +186,44 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
         )
         plugin.judge.route.assert_not_awaited()
 
+    async def test_llm_tool_routes_numeric_choice_without_intent_judgment(self) -> None:
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.models import StoryRoom
+
+        room = StoryRoom(
+            room_id="room-1",
+            owner_id="10001",
+            story_config={},
+            bible={},
+            members={},
+            created_at=1,
+            last_active_at=1,
+            current_choices=["甲", "乙", "丙"],
+        )
+        plugin = object.__new__(self.module.AIInteractiveFictionPlugin)
+        plugin.store = SimpleNamespace(
+            pending_starts={},
+            rewound_users={},
+            room_for_user=lambda _user_id: room,
+        )
+        plugin.saves = object()
+        plugin.config = SimpleNamespace(
+            enable_natural_language=True,
+            global_judge_provider_id="judge",
+        )
+        plugin.judge = SimpleNamespace(route=AsyncMock(return_value={"intent": "chat"}))
+        plugin._cleanup_if_due = AsyncMock()
+        plugin._perform_command_action = AsyncMock()
+        event = SimpleNamespace(
+            get_sender_id=lambda: "10001",
+            get_messages=lambda: [],
+        )
+
+        output = [item async for item in plugin.interactive_fiction_tool(event, "第三项")]
+
+        self.assertEqual(output, ["互动故事操作已执行，结果已直接发送给用户，无需重复回复。"])
+        plugin._perform_command_action.assert_awaited_once_with(event, "10001", "3")
+        plugin.judge.route.assert_not_awaited()
+
     async def test_message_router_skips_judge_before_game_starts(self) -> None:
         class Store:
             pending_starts = {}
@@ -247,6 +285,72 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(event.stopped)
         plugin.judge.route.assert_awaited_once()
         plugin._send_text.assert_awaited_once_with(event, self.module.REWOUND_TEXT)
+
+    async def test_at_bot_numeric_choice_bypasses_ambiguous_intent_judgment(self) -> None:
+        from astrbot.api.message_components import At, Plain
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.models import StoryRoom
+
+        room = StoryRoom(
+            room_id="room-1",
+            owner_id="10001",
+            story_config={},
+            bible={},
+            members={},
+            created_at=1,
+            last_active_at=1,
+            current_choices=["退开并倾听", "检查练习纸", "打开教室门"],
+        )
+        store = SimpleNamespace(
+            pending_starts={},
+            rewound_users={},
+            room_for_user=lambda _user_id: room,
+        )
+        plugin = object.__new__(self.module.AIInteractiveFictionPlugin)
+        plugin.store = store
+        plugin.saves = object()
+        plugin.config = SimpleNamespace(
+            enable_natural_language=True,
+            global_judge_provider_id="judge",
+        )
+        plugin.judge = SimpleNamespace(route=AsyncMock(return_value={"intent": "chat"}))
+        plugin._cleanup_if_due = AsyncMock()
+        plugin._perform_command_action = AsyncMock()
+        event = SimpleNamespace(
+            stopped=False,
+            get_sender_id=lambda: "10001",
+            get_self_id=lambda: "20002",
+            # OneBot excludes the first @self component from message_str.
+            get_message_str=lambda: "3",
+            get_messages=lambda: [At(qq="20002", name="阿米娅"), Plain("3")],
+        )
+        event.stop_event = lambda: setattr(event, "stopped", True)
+
+        await plugin.on_message(event)
+
+        self.assertTrue(event.stopped)
+        plugin._perform_command_action.assert_awaited_once_with(event, "10001", "3")
+        plugin.judge.route.assert_not_awaited()
+
+    def test_direct_natural_choice_accepts_common_forms_and_validates_room_options(self) -> None:
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.models import StoryRoom
+
+        room = StoryRoom(
+            room_id="room-1",
+            owner_id="10001",
+            story_config={},
+            bible={},
+            members={},
+            created_at=1,
+            last_active_at=1,
+            current_choices=["甲", "乙", "丙"],
+        )
+        event = SimpleNamespace(get_messages=lambda: [])
+        parse = self.module.AIInteractiveFictionPlugin._direct_natural_choice
+        self.assertEqual(parse(event, "3", room), "3")
+        self.assertEqual(parse(event, "选3", room), "3")
+        self.assertEqual(parse(event, "第三项", room), "3")
+        self.assertEqual(parse(event, "4", room), "")
+        self.assertEqual(parse(event, "今天有3个人", room), "")
 
     async def test_rewound_player_can_naturally_rejoin_original_room(self) -> None:
         room = SimpleNamespace(owner_id="owner")
@@ -511,6 +615,61 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["trigger_types"], {"high_risk_complex_action"})
         self.assertTrue(kwargs["lock_already_held"])
         plugin.busy.finish(room.room_id)
+
+    async def test_non_safe_action_is_not_rejected_when_reason_is_none(self) -> None:
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.config import StoryConfig
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.models import StoryRoom
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.storage import RoomBusyRegistry
+
+        room = StoryRoom(
+            room_id="room-1",
+            owner_id="10001",
+            story_config=StoryConfig("story", "测试", enabled=True).to_runtime_dict(),
+            bible={},
+            members={},
+            created_at=1,
+            last_active_at=1,
+        )
+        prepared = object()
+        plugin = object.__new__(self.module.AIInteractiveFictionPlugin)
+        plugin.store = SimpleNamespace(room_for_user=lambda _user_id: room, rewound_users={})
+        plugin.busy = RoomBusyRegistry()
+        plugin.config = SimpleNamespace(
+            forbid_player_autonomy=True,
+            unreasonable_action_message="你想搁这开挂呢？哒咩！",
+        )
+        plugin.judge = SimpleNamespace(
+            route=AsyncMock(
+                return_value={
+                    "intent": "action",
+                    "reasonable": False,
+                    "unreasonable_reason": "none",
+                    "content_type": "non_safe",
+                }
+            )
+        )
+        plugin.game = SimpleNamespace(prepare_action=AsyncMock(return_value=prepared))
+        plugin._perform_action = AsyncMock()
+        plugin._send_text = AsyncMock()
+
+        await plugin._perform_command_action(
+            object(),
+            "10001",
+            "把旁边的血肉当做性玩具来自慰",
+        )
+
+        plugin._send_text.assert_not_awaited()
+        plugin._perform_action.assert_awaited_once()
+        self.assertEqual(plugin._perform_action.await_args.args[4], "non_safe")
+        self.assertIs(plugin._perform_action.await_args.kwargs["prepared"], prepared)
+        plugin.busy.finish(room.room_id)
+
+    def test_only_supported_unreasonable_reasons_reject_actions(self) -> None:
+        classify = self.module.AIInteractiveFictionPlugin._route_action_is_reasonable
+        self.assertTrue(classify({"reasonable": False, "unreasonable_reason": "none"}))
+        self.assertFalse(classify({"reasonable": True, "unreasonable_reason": "physically_impossible"}))
+        self.assertFalse(classify({"reasonable": True, "unreasonable_reason": "claims_result"}))
+        self.assertFalse(classify({"reasonable": False}))
 
     def test_roundtable_action_trigger_categories_are_exclusive_except_non_safe(self) -> None:
         classify = self.module.AIInteractiveFictionPlugin._roundtable_action_triggers
