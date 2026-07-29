@@ -1,0 +1,325 @@
+{
+  "enable_natural_language": {
+    "description": "启用自然语言",
+    "hint": "关闭后只响应插件指令，自然语言开始、加入、存读档和游玩行为全部停用",
+    "type": "bool",
+    "default": true,
+    "obvious_hint": true
+  },
+  "stories": {
+    "description": "自定义故事条目",
+    "hint": "未填写的世界观、主角等内容由圆桌会议自动补充",
+    "type": "template_list",
+    "templates": {
+      "story": {
+        "name": "故事条目",
+        "display_item": ["name"],
+        "hide_hint_in_list": true,
+        "items": {
+          "name": {
+            "description": "故事名称",
+            "type": "string",
+            "default": "未命名故事"
+          },
+          "enabled": {
+            "description": "启用",
+            "type": "bool",
+            "default": false
+          },
+          "expected_minutes": {
+            "description": "预期游玩时长（分钟）",
+            "hint": "用于控制剧情节奏；全随机故事的时长由圆桌会议决定",
+            "type": "int",
+            "default": 20
+          },
+          "world": {
+            "description": "自定义世界观",
+            "type": "text",
+            "default": ""
+          },
+          "protagonist": {
+            "description": "主角描述",
+            "type": "text",
+            "default": ""
+          },
+          "required_tags": {
+            "description": "必要标签",
+            "hint": "使用英文逗号分隔；留空表示不强制标签",
+            "type": "string",
+            "default": ""
+          },
+          "content_limit": {
+            "description": "内容限制",
+            "hint": "只拼接到实际游玩行动的圆桌会议提示词开头",
+            "type": "text",
+            "default": "常规内容（移动、道具介绍等一般性质内容）：行为＋场景介绍，不超过30字。\nNSFW：具体行动＋与对方的过程＋结果，不超过200字。\n只用第二人称“你”来称呼玩家。\n只输出行为结果，严禁自作主张做出玩家未说过的行为。"
+          },
+          "mechanisms": {
+            "description": "功能机制",
+            "hint": "不勾选则故事中不启用对应机制",
+            "type": "list",
+            "default": [],
+            "options": ["save"],
+            "labels": ["存档"]
+          },
+          "temperature": {
+            "description": "温度（Temperature）",
+            "type": "float",
+            "default": 1.0
+          },
+          "memory_mode": {
+            "description": "记忆模式",
+            "type": "string",
+            "default": "all",
+            "options": ["all", "compressed"],
+            "labels": ["全部记忆", "长记忆自动压缩"]
+          },
+          "compress_after_turns": {
+            "description": "超出多少轮自动压缩",
+            "hint": "按有效游玩行动计算；压缩后保留摘要与最近一轮",
+            "type": "int",
+            "default": 20,
+            "condition": {"memory_mode": "compressed"}
+          },
+          "compression_provider_id": {
+            "description": "文本压缩LLM",
+            "hint": "选择 AstrBot 已配置的模型；临时压缩和长记忆自动压缩共用",
+            "type": "string",
+            "default": "",
+            "_special": "select_provider"
+          },
+          "action_restriction": {
+            "description": "玩家行动限制",
+            "hint": "0~100，数值越高越严格，控制对玩家自述结果和不合理行动的拒绝程度",
+            "type": "int",
+            "default": 50
+          },
+          "multiplayer": {
+            "description": "群聊多人同游",
+            "type": "bool",
+            "default": true
+          }
+        }
+      }
+    }
+  },
+  "roundtable_models": {
+    "description": "圆桌会议",
+    "hint": "提案和评审均按低优先级到高优先级执行，让高优先级模型获得更多上下文",
+    "type": "template_list",
+    "templates": {
+      "model": {
+        "name": "圆桌模型",
+        "display_item": ["name", "role"],
+        "display_item_separator": "——",
+        "hide_hint_in_list": true,
+        "items": {
+          "name": {"description": "名称", "type": "string", "default": "圆桌成员"},
+          "enabled": {"description": "启用", "type": "bool", "default": false},
+          "priority": {
+            "description": "优先级",
+            "hint": "0~100，数值越高越晚执行；同优先级随机",
+            "type": "int",
+            "default": 50
+          },
+          "role": {
+            "description": "身份",
+            "type": "string",
+            "default": "proposal",
+            "options": ["proposal", "reviewer"],
+            "labels": ["提案", "评审"]
+          },
+          "content_type": {
+            "description": "生成的内容类型",
+            "type": "string",
+            "default": "regular",
+            "options": ["regular", "non_safe"],
+            "labels": ["常规", "非安全"]
+          },
+          "provider_id": {
+            "description": "选择模型提供商",
+            "type": "string",
+            "default": "",
+            "_special": "select_provider"
+          },
+          "persona": {
+            "description": "人设提示词",
+            "type": "text",
+            "default": ""
+          },
+          "timeout_seconds": {
+            "description": "超时时长（秒）",
+            "hint": "-1 跟随全局默认生成超时时长",
+            "type": "int",
+            "default": -1
+          }
+        }
+      }
+    }
+  },
+  "discussion_mode": {
+    "description": "圆桌会议讨论方式",
+    "type": "string",
+    "default": "sequential",
+    "options": ["sequential", "independent"],
+    "labels": ["轮流讨论", "单独提案"]
+  },
+  "discussion_rounds": {
+    "description": "圆桌会议讨论轮数",
+    "type": "int",
+    "default": 1,
+    "condition": {"discussion_mode": "sequential"}
+  },
+  "image_generators": {
+    "description": "人物绘图条目",
+    "hint": "人物首次登场使用生图，侵犯或杀害CG使用改图；按优先级从高到低失败切换",
+    "type": "template_list",
+    "templates": {
+      "openai": {
+        "name": "OpenAI兼容",
+        "display_item": ["name"],
+        "hide_hint_in_list": true,
+        "items": {
+          "name": {"description": "名称", "type": "string", "default": "OpenAI绘图"},
+          "enabled": {"description": "开关", "type": "bool", "default": false},
+          "url": {"description": "URL", "type": "string", "default": "https://api.openai.com/v1"},
+          "api_keys": {"description": "API Key", "hint": "可添加多个Key，按顺序失败切换", "type": "list", "default": []},
+          "model_name": {"description": "模型名称", "type": "string", "default": "gpt-image-1"},
+          "content_type": {
+            "description": "类型",
+            "type": "string",
+            "default": "regular",
+            "options": ["regular", "free"],
+            "labels": ["常规", "自由"]
+          },
+          "prompt_provider_id": {
+            "description": "提示词生成的模型",
+            "hint": "选择 AstrBot 已配置的模型，根据圆桌故事和角色资料生成生图或改图提示词",
+            "type": "string",
+            "default": "",
+            "_special": "select_provider"
+          },
+          "priority": {"description": "优先级", "type": "int", "default": 50},
+          "fake_forward_mode": {
+            "description": "图片消息伪造转发",
+            "type": "string",
+            "default": "requester",
+            "options": ["requester", "custom_qq"],
+            "labels": ["生图要求者", "自定义QQ号"]
+          },
+          "custom_qq": {
+            "description": "自定义QQ号",
+            "type": "string",
+            "default": "",
+            "condition": {"fake_forward_mode": "custom_qq"}
+          },
+          "timeout_seconds": {
+            "description": "超时时长（秒）",
+            "hint": "-1 跟随全局默认生成超时时长",
+            "type": "int",
+            "default": -1
+          }
+        }
+      },
+      "comfyui": {
+        "name": "ComfyUI工作流",
+        "display_item": ["name"],
+        "hide_hint_in_list": true,
+        "items": {
+          "name": {"description": "名称", "type": "string", "default": "ComfyUI工作流"},
+          "enabled": {"description": "开关", "type": "bool", "default": false},
+          "support_mode": {
+            "description": "支持模式",
+            "type": "string",
+            "default": "generate",
+            "options": ["generate", "edit"],
+            "labels": ["仅生图", "仅改图"]
+          },
+          "workflow_content": {
+            "description": "工作流内容（API形式JSON）",
+            "type": "text",
+            "default": ""
+          },
+          "service_url": {
+            "description": "服务地址",
+            "type": "string",
+            "default": "http://127.0.0.1:8188"
+          },
+          "prompt_provider_id": {
+            "description": "提示词生成的模型",
+            "hint": "选择 AstrBot 已配置的模型，根据圆桌故事和角色资料生成提示词",
+            "type": "string",
+            "default": "",
+            "_special": "select_provider"
+          },
+          "priority": {"description": "优先级", "type": "int", "default": 50}
+        }
+      }
+    }
+  },
+  "workflow_node_mappings": {
+    "description": "工作流节点映射条目",
+    "type": "template_list",
+    "templates": {
+      "mapping": {
+        "name": "自定义节点",
+        "display_item": ["name", "workflow_id"],
+        "display_item_separator": "——",
+        "hide_hint_in_list": true,
+        "items": {
+          "name": {"description": "名称", "type": "string", "default": "节点映射"},
+          "workflow_id": {"description": "所属工作流ID", "hint": "必须与工作流名称完全一致", "type": "string", "default": ""},
+          "node_id": {"description": "节点ID", "type": "string", "default": ""},
+          "field_path": {"description": "字段路径", "hint": "例如 inputs.text", "type": "string", "default": "inputs.text"},
+          "content_type": {
+            "description": "内容类型",
+            "type": "string",
+            "default": "positive_prompt",
+            "options": ["positive_prompt", "image_input"],
+            "labels": ["正向提示词", "图像输入"]
+          }
+        }
+      }
+    }
+  },
+  "global_judge_provider_id": {
+    "description": "全局判断LLM",
+    "hint": "推荐选择轻量模型",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider"
+  },
+  "global_judge_persona": {
+    "description": "自定义全局判断LLM人设",
+    "type": "text",
+    "default": ""
+  },
+  "forbid_player_autonomy": {
+    "description": "严禁LLM替玩家行动",
+    "type": "bool",
+    "default": true
+  },
+  "streaming": {
+    "description": "流式输出",
+    "hint": "开启后所有文本LLM优先使用真流式；不支持时自动使用普通输出",
+    "type": "bool",
+    "default": true
+  },
+  "unreasonable_action_message": {
+    "description": "玩家不合理行为拒绝话术",
+    "type": "string",
+    "default": "你想搁这开挂呢？哒咩！"
+  },
+  "global_timeout_seconds": {
+    "description": "全局默认生成超时时长",
+    "hint": "单位秒",
+    "type": "int",
+    "default": 300
+  },
+  "cache_cleanup_days": {
+    "description": "缓存自动清理时间",
+    "hint": "单位天，按故事最终活跃时间清理存档、数据和生成图片",
+    "type": "int",
+    "default": 7
+  }
+}

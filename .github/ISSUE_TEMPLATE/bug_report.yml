@@ -1,0 +1,85 @@
+name: Bug 报告
+description: 报告可复现的插件异常或行为错误
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先确认使用的是最新版本。不要提交 API Key、访问令牌、真实 QQ 号、未脱敏聊天记录或存档。
+  - type: input
+    id: plugin_version
+    attributes:
+      label: 插件版本
+      placeholder: v0.0.1
+    validations:
+      required: true
+  - type: input
+    id: astrbot_version
+    attributes:
+      label: AstrBot 版本
+      placeholder: v4.x.x
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: 平台与适配器
+      placeholder: OneBot v11 / aiocqhttp
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 问题范围
+      options:
+        - 开局或自然语言判断
+        - 圆桌会议或模型调用
+        - 多人房间或行动锁
+        - 存档、读档或记忆压缩
+        - OpenAI 兼容人物绘图
+        - ComfyUI 工作流
+        - 配置面板
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+      description: 应该发生什么？
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 实际发生了什么？请包含完整报错文案。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 配置……
+        2. 发送……
+        3. 出现……
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 脱敏日志
+      description: 请删除凭据、QQ 号、用户输入和本地隐私路径。
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交确认
+      options:
+        - label: 我已搜索现有 Issue，未发现相同问题。
+          required: true
+        - label: 我已确认内容中不含凭据或个人隐私。
+          required: true

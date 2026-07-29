@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing vX.Y.Z tag to package
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      PLUGIN_NAME: astrbot_plugin_ai_interactive_fiction
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Validate source and version
+        run: |
+          python -m compileall -q main.py services test_core.py scripts
+          python -B -m unittest -v test_core
+          python scripts/validate_release.py --tag "$RELEASE_TAG"
+
+      - name: Build plugin archive
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_dir="dist/$PLUGIN_NAME"
+          archive="dist/$PLUGIN_NAME-$RELEASE_TAG.zip"
+          mkdir -p "$package_dir"
+          cp -R main.py __init__.py _conf_schema.json metadata.yaml requirements.txt services README.md CHANGELOG.md LICENSE "$package_dir/"
+          if [[ -f logo.png ]]; then cp logo.png "$package_dir/"; fi
+          find "$package_dir" -type d -name __pycache__ -prune -exec rm -rf {} +
+          find "$package_dir" -type f -name '*.pyc' -delete
+          (cd dist && zip -qr "$(basename "$archive")" "$PLUGIN_NAME")
+          size=$(stat -c%s "$archive")
+          if (( size > 16777216 )); then
+            echo "Archive exceeds AstrBot's 16 MB limit: $size bytes" >&2
+            exit 1
+          fi
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PLUGIN_NAME }}-${{ env.RELEASE_TAG }}
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+        shell: bash
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$ARCHIVE" --clobber
+          else
+            gh release create "$RELEASE_TAG" "$ARCHIVE" --verify-tag --title "$RELEASE_TAG" --notes-file "docs/releases/$RELEASE_TAG.md"
+          fi

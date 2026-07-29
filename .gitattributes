@@ -1,0 +1,21 @@
+* text=auto
+
+*.py text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+
+.github/ export-ignore
+docs/ export-ignore
+scripts/ export-ignore
+test_core.py export-ignore
+.gitignore export-ignore
+.gitattributes export-ignore
+CONTRIBUTING.md export-ignore
+SECURITY.md export-ignore

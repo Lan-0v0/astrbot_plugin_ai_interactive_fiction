@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test and tool caches
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+htmlcov/
+
+# IDE and local tools
+.vscode/
+.idea/
+.agents/
+.ace-tool/
+.claude/
+.serena/
+.kilocode/
+.kiro/
+*.swp
+*.swo
+*~
+
+# Runtime data and generated media
+data/
+images/
+generated_images/
+*.log
+tmp/
+
+# Secrets and local configuration
+.env
+.env.*
+*.key
+secrets/
+config.local.*
+
+# Operating system files
+.DS_Store
+Thumbs.db

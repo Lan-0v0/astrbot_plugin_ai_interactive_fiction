@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞报告
+    url: https://github.com/Lan-0v0/astrbot_plugin_ai_interactive_fiction/security/advisories/new
+    about: 请通过私密渠道报告凭据泄露、越权访问或玩家数据问题
+  - name: AstrBot 官方文档
+    url: https://docs.astrbot.app/
+    about: AstrBot 本体、平台适配器与模型提供商配置问题请先查阅官方文档
