@@ -143,7 +143,7 @@ class GlobalJudge:
 2. 玩家只能陈述自己要做什么，不能自行宣告成功、掉落、升级、击杀结果。此类内容根据行动限制判断reasonable。
 3. 被迫承受的结果不是玩家主动行动，不按玩家自述结果处理。
 4. 血腥、性或其他非安全行动标为non_safe，不拒绝、不说教。
-5. slot仅在明确提到1至4号槽时填写整数，否则为null。
+5. 明确提到槽位数字时，slot必须原样填写该整数，即使超出1至4；未提到数字才为null，范围校验由插件完成。
 6. select_story用于回答故事选择菜单，story_choice填写编号、名称或random。
 7. join时owner_id尽量提取房主QQ，requirements只保留角色要求。
 8. include_psychology只在当前结果确实必须有极短心理描写时为true；通常为false，绝不能借此替玩家决定感受、想法或意志。

@@ -6,11 +6,12 @@
 
 面向 AstrBot 的多模型 AI 互动故事插件。故事正文由圆桌提案模型讨论、评审模型依次评审改写，最后一名成功评审给出玩家实际看到的结果。支持单人故事、OneBot 群聊多人同游、自然语言操作、存读档、长记忆压缩和人物绘图。
 
-当前版本：`v0.0.1`
+当前版本：`v0.0.2`
 
 ## 功能特性
 
 - 普通聊天与游玩消息共存：仅在全局判断 LLM 确认消息属于插件操作或玩家行动时消费事件。
+- AstrBot 原生注册：故事、存读档与圆桌会议会显示在指令管理中，并提供自然语言互动故事函数工具。
 - 圆桌会议：支持轮流讨论或单独提案、优先级排序、多轮讨论和常规/非安全模型路由。
 - 多人同游：房主创建共享世界，每位玩家拥有独立角色，首条有效行动进入房间行动锁。
 - 存档回溯：每人四个手动槽和一个自动槽；多人读档会同步回溯共享世界。
@@ -50,8 +51,8 @@ python -m pip install -r requirements.txt
 首次使用至少需要：
 
 1. 选择“全局判断 LLM”。
-2. 在“圆桌会议”中启用至少一名常规提案模型。
-3. 在“圆桌会议”中启用至少一名常规评审模型。
+2. 在“圆桌会议”中添加至少一名常规提案模型并选择提供商；新条目默认启用。
+3. 添加至少一名常规评审模型并选择提供商；可直接使用预设人设或自行修改。
 4. 保存配置并重载插件。
 
 若缺少常规提案或评审配置，插件会明确提示缺少模型配置。完整字段说明见 [配置指南](docs/CONFIGURATION.md)。
@@ -98,7 +99,7 @@ python -m pip install -r requirements.txt
 
 ```powershell
 python -m pip install -r requirements.txt
-python -B -m unittest -v test_core
+python -B -m unittest -v test_core test_astrbot_integration
 python scripts/validate_release.py
 ```
 
@@ -106,7 +107,7 @@ python scripts/validate_release.py
 
 ## 发布
 
-推送符合语义化版本的标签（例如 `v0.0.1`）后，GitHub Actions 会运行测试、检查版本一致性、构建小于 16 MB 的插件压缩包并创建 GitHub Release。详细步骤见 [发布指南](docs/RELEASING.md)。
+推送符合语义化版本的标签（例如 `v0.0.2`）后，GitHub Actions 会运行测试、检查版本一致性、构建小于 16 MB 的插件压缩包并创建 GitHub Release。详细步骤见 [发布指南](docs/RELEASING.md)。
 
 ## 许可证
 

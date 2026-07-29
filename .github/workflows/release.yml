@@ -38,8 +38,8 @@ jobs:
 
       - name: Validate source and version
         run: |
-          python -m compileall -q main.py services test_core.py scripts
-          python -B -m unittest -v test_core
+          python -m compileall -q main.py services test_core.py test_astrbot_integration.py scripts
+          python -B -m unittest -v test_core test_astrbot_integration
           python scripts/validate_release.py --tag "$RELEASE_TAG"
 
       - name: Build plugin archive

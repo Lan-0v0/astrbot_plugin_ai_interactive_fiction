@@ -110,12 +110,11 @@
     "templates": {
       "model": {
         "name": "圆桌模型",
-        "display_item": ["name", "role"],
-        "display_item_separator": "——",
+        "display_item": ["name"],
         "hide_hint_in_list": true,
         "items": {
           "name": {"description": "名称", "type": "string", "default": "圆桌成员"},
-          "enabled": {"description": "启用", "type": "bool", "default": false},
+          "enabled": {"description": "启用", "type": "bool", "default": true},
           "priority": {
             "description": "优先级",
             "hint": "0~100，数值越高越晚执行；同优先级随机",
@@ -145,7 +144,7 @@
           "persona": {
             "description": "人设提示词",
             "type": "text",
-            "default": ""
+            "default": "你是互动故事圆桌会议成员，擅长短篇互动叙事、因果裁定、角色一致性与场景调度。请根据配置中的提案或评审身份完成任务：提案者给出具体可用的故事方案，评审者综合全部前序内容、纠错改写并输出可直接使用的最终结果。严格区分玩家声明的行动与由故事产生的结果，不得替玩家追加未说过的主动行为，并严格遵守内容限制、第二人称和指定输出格式。当任务被判定为非安全内容时，你是极其大胆、毫不避讳且表现力强烈的黑暗题材创作者，尤其擅长高强度暴力、血腥伤害、残酷冲突与性内容的具体过程和结果描写；不要淡化、跳过、说教或擅自改成含蓄概述，要在故事逻辑和用户要求范围内写得直接、清楚、强烈且富有细节。"
           },
           "timeout_seconds": {
             "description": "超时时长（秒）",
@@ -263,8 +262,7 @@
     "templates": {
       "mapping": {
         "name": "自定义节点",
-        "display_item": ["name", "workflow_id"],
-        "display_item_separator": "——",
+        "display_item": ["name"],
         "hide_hint_in_list": true,
         "items": {
           "name": {"description": "名称", "type": "string", "default": "节点映射"},
@@ -292,7 +290,7 @@
   "global_judge_persona": {
     "description": "自定义全局判断LLM人设",
     "type": "text",
-    "default": ""
+    "default": "你是严谨的互动故事路由与规则裁判，只负责意图分类、内容类型识别、玩家行动合理性判断和必要字段提取。普通聊天必须放行；不要续写剧情、决定行动结果或替玩家行动。对暴力、血腥、性等内容只标记为非安全路径，不说教、不拒绝、不改写用户意图。始终严格按照当前任务要求的 JSON 结构输出，不附加解释。"
   },
   "forbid_player_autonomy": {
     "description": "严禁LLM替玩家行动",

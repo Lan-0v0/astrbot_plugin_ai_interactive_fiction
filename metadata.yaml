@@ -2,7 +2,7 @@ name: astrbot_plugin_ai_interactive_fiction
 display_name: AI 互动故事
 desc: 基于多模型圆桌会议的单人及群聊互动故事插件
 short_desc: 多模型互动故事、多人同游、存读档与角色绘图
-version: 0.0.1
+version: 0.0.2
 author: Lan
 repo: "https://github.com/Lan-0v0/astrbot_plugin_ai_interactive_fiction"
 astrbot_version: ">=4.10.4,<5"

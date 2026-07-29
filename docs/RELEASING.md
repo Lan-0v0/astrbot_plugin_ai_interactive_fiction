@@ -41,3 +41,7 @@ GitHub Release 成功后，前往 [AstrBot 插件发布页面](https://cloud.ast
 ## v0.0.1
 
 首个版本的发布说明见 [v0.0.1](releases/v0.0.1.md)。
+
+## v0.0.2
+
+原生指令、函数工具、配置预设与回归测试版本的发布说明见 [v0.0.2](releases/v0.0.2.md)。

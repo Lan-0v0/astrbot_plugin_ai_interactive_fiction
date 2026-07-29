@@ -8,15 +8,32 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from services.config import PluginConfig, RoundtableModelConfig, StoryConfig
+from services.config import (
+    DEFAULT_GLOBAL_JUDGE_PERSONA,
+    DEFAULT_ROUNDTABLE_PERSONA,
+    ImageGeneratorConfig,
+    PluginConfig,
+    RoundtableModelConfig,
+    StoryConfig,
+    WorkflowNodeMapping,
+)
 from services.game import GameService
+from services.images import ImageService
+from services.llm import GlobalJudge
+from services.memory import MemoryService
 from services.models import RoomMember, StoryRoom
 from services.prompts import action_task
-from services.roundtable import RoundtableOutput, RoundtableService
+from services.roundtable import (
+    RoundtableConfigurationError,
+    RoundtableOutput,
+    RoundtableService,
+)
 from services.saves import SaveService
 from services.storage import RoomBusyRegistry, StateStore
 from services.workflows import merge_workflow, set_dot_path
-from services.config import ImageGeneratorConfig, WorkflowNodeMapping
+
+
+ROOT = Path(__file__).resolve().parent
 
 
 def make_room(*, members: tuple[str, ...] = ("owner",), turn: int = 0) -> StoryRoom:
@@ -61,6 +78,45 @@ class ConfigTests(unittest.TestCase):
             {"image_generators": [{"__template_key": "comfyui", "name": "wf", "enabled": True}]}
         )
         self.assertEqual(cfg.image_generators[0].kind, "comfyui")
+
+    def test_roundtable_defaults_and_explicit_disable(self) -> None:
+        cfg = PluginConfig(
+            {
+                "roundtable_models": [
+                    {"name": "unsafe", "role": "reviewer", "content_type": "non_safe"},
+                    {"name": "off", "enabled": False},
+                ],
+                "global_judge_persona": "",
+            }
+        )
+        unsafe, disabled = cfg.roundtable_models
+        self.assertTrue(unsafe.enabled)
+        self.assertIn("最终评审", unsafe.persona)
+        self.assertIn("暴力", unsafe.persona)
+        self.assertIn("血腥", unsafe.persona)
+        self.assertIn("性内容", unsafe.persona)
+        self.assertFalse(disabled.enabled)
+        self.assertEqual(cfg.global_judge_persona, DEFAULT_GLOBAL_JUDGE_PERSONA)
+
+    def test_configuration_schema_defaults_and_item_subtitles(self) -> None:
+        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        templates = {
+            "story": schema["stories"]["templates"]["story"],
+            "roundtable": schema["roundtable_models"]["templates"]["model"],
+            "openai": schema["image_generators"]["templates"]["openai"],
+            "comfyui": schema["image_generators"]["templates"]["comfyui"],
+            "mapping": schema["workflow_node_mappings"]["templates"]["mapping"],
+        }
+        for template in templates.values():
+            self.assertEqual(template["display_item"], ["name"])
+            self.assertTrue(template["hide_hint_in_list"])
+        roundtable_items = templates["roundtable"]["items"]
+        self.assertTrue(roundtable_items["enabled"]["default"])
+        self.assertEqual(roundtable_items["persona"]["default"], DEFAULT_ROUNDTABLE_PERSONA)
+        self.assertEqual(schema["global_judge_persona"]["default"], DEFAULT_GLOBAL_JUDGE_PERSONA)
+
+    def test_natural_slot_routing_preserves_out_of_range_numbers_for_validation(self) -> None:
+        self.assertIn("即使超出1至4", GlobalJudge.ROUTE_SYSTEM)
 
 
 class LockTests(unittest.TestCase):
@@ -118,6 +174,12 @@ class SaveTests(unittest.TestCase):
         self.assertNotIn("late", self.store.rewound_users)
         self.assertNotIn("owner", self.store.saves)
 
+    def test_cleanup_expired_uses_room_last_activity(self) -> None:
+        self.room.last_active_at = 100
+        self.assertEqual(self.store.cleanup_expired(7, now=100 + 7 * 86400 - 1), [])
+        self.assertEqual(self.store.cleanup_expired(7, now=100 + 7 * 86400 + 1), ["room-1"])
+        self.assertNotIn("owner", self.store.player_rooms)
+
 
 class WorkflowTests(unittest.TestCase):
     def test_dot_path_and_workflow_mapping(self) -> None:
@@ -137,15 +199,27 @@ class WorkflowTests(unittest.TestCase):
         merged = merge_workflow(generator, [mapping], prompt="new")
         self.assertEqual(merged["6"]["inputs"]["text"], "new")
 
+    def test_image_candidates_route_non_safe_edits_to_free_or_comfyui(self) -> None:
+        generators = [
+            ImageGeneratorConfig("openai", "regular", True, 90, "p", {"content_type": "regular"}),
+            ImageGeneratorConfig("openai", "free", True, 80, "p", {"content_type": "free"}),
+            ImageGeneratorConfig("comfyui", "local", True, 70, "p", {"support_mode": "edit"}),
+        ]
+        service = ImageService(FakeLLM(), generators, [], default_timeout=300, logger=Logger())
+        names = [item.name for item in service._candidates(mode="edit", non_safe=True)]
+        self.assertEqual(names, ["free", "local"])
+
 
 class FakeLLM:
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.prompts: list[str] = []
+        self.system_prompts: list[str] = []
 
     async def generate(self, provider_id: str, prompt: str, **kwargs) -> str:
         self.calls.append(provider_id)
         self.prompts.append(prompt)
+        self.system_prompts.append(str(kwargs.get("system_prompt") or ""))
         return f"output-{provider_id}"
 
     async def describe_provider(self, provider_id: str):
@@ -158,6 +232,7 @@ class FailingProposalLLM(FakeLLM):
     async def generate(self, provider_id: str, prompt: str, **kwargs) -> str:
         self.calls.append(provider_id)
         self.prompts.append(prompt)
+        self.system_prompts.append(str(kwargs.get("system_prompt") or ""))
         if provider_id.startswith("p"):
             raise RuntimeError("failed")
         return f"output-{provider_id}"
@@ -166,6 +241,41 @@ class FailingProposalLLM(FakeLLM):
 class Logger:
     def warning(self, *_args, **_kwargs) -> None:
         return None
+
+
+class FakeRoundtable:
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+        self.calls: list[dict] = []
+
+    async def run(self, task: str, **kwargs) -> RoundtableOutput:
+        self.calls.append({"task": task, **kwargs})
+        return RoundtableOutput(json.dumps(self.payload, ensure_ascii=False), [])
+
+
+class GameTests(unittest.IsolatedAsyncioTestCase):
+    async def test_random_story_runtime_fields_are_built_from_roundtable(self) -> None:
+        roundtable = FakeRoundtable(
+            {
+                "story_bible": {"title": "随机故事"},
+                "public_player_profile": {"name": "玩家"},
+                "private_player_profile": {"secret": "x"},
+                "opening_state": "醒来",
+                "runtime": {"expected_minutes": 26, "save_enabled": True},
+            }
+        )
+        game = GameService(roundtable, object())
+        built = await game.build_story(
+            None,
+            requirements="主角是女性",
+            owner_name="测试者",
+            content_type="regular",
+        )
+        self.assertEqual(built.story.name, "随机故事")
+        self.assertEqual(built.story.expected_minutes, 26)
+        self.assertTrue(built.story.save_enabled)
+        self.assertEqual(built.opening_state, "醒来")
+        self.assertIn("主角是女性", roundtable.calls[0]["task"])
 
 
 class RoundtableTests(unittest.IsolatedAsyncioTestCase):
@@ -204,6 +314,46 @@ class RoundtableTests(unittest.IsolatedAsyncioTestCase):
         output = await RoundtableService(llm, models, mode="sequential", rounds=2, logger=Logger()).run("task")
         self.assertEqual(llm.calls, ["p1", "p2", "r"])
         self.assertEqual(output.final_text, "output-r")
+
+    async def test_missing_role_configuration_is_reported(self) -> None:
+        models = [RoundtableModelConfig("p", True, 1, "proposal", "regular", "p", "", -1)]
+        with self.assertRaisesRegex(RoundtableConfigurationError, "缺少常规/非安全模型配置"):
+            await RoundtableService(FakeLLM(), models, mode="sequential", rounds=1, logger=Logger()).run("task")
+
+    async def test_empty_legacy_persona_gets_non_safe_role_fallback(self) -> None:
+        models = [
+            RoundtableModelConfig("p", True, 1, "proposal", "non_safe", "p", "", -1),
+            RoundtableModelConfig("r", True, 1, "reviewer", "non_safe", "r", "", -1),
+        ]
+        llm = FakeLLM()
+        await RoundtableService(llm, models, mode="sequential", rounds=1, logger=Logger()).run(
+            "task", content_type="non_safe"
+        )
+        self.assertIn("暴力", llm.system_prompts[0])
+        self.assertIn("性内容", llm.system_prompts[0])
+        self.assertIn("最终评审", llm.system_prompts[-1])
+
+
+class MemoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_long_memory_compression_keeps_latest_turn(self) -> None:
+        room = make_room(turn=3)
+        room.history = [
+            {"turn": 1, "result": "a"},
+            {"turn": 2, "result": "b"},
+            {"turn": 3, "result": "c"},
+        ]
+        story = StoryConfig(
+            story_id="s",
+            name="n",
+            enabled=True,
+            memory_mode="compressed",
+            compress_after_turns=2,
+            compression_provider_id="compressor",
+        )
+        service = MemoryService(FakeLLM(), Logger())
+        self.assertTrue(await service.compress_if_needed(room, story))
+        self.assertEqual(room.memory_summary, "output-compressor")
+        self.assertEqual(room.history, [{"turn": 3, "result": "c"}])
 
 
 class PromptTests(unittest.TestCase):

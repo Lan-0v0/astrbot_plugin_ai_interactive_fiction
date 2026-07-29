@@ -5,7 +5,7 @@ import random
 from dataclasses import dataclass
 from typing import Any
 
-from .config import RoundtableModelConfig
+from .config import RoundtableModelConfig, default_roundtable_persona
 from .llm import LLMService
 
 
@@ -141,11 +141,7 @@ class RoundtableService:
         return RoundtableOutput(final_text=final_text, discussion=discussion)
 
     async def _call_model(self, model: RoundtableModelConfig, prompt: str, temperature: float) -> str:
-        system = (
-            model.persona
-            or ("你是圆桌会议提案者。提出可供后续模型改写融合的具体方案。" if model.role == "proposal" else
-                "你是圆桌会议评审。综合全部提案和先前评审，修改问题并严格按任务要求给出可直接使用的最终结果。")
-        )
+        system = model.persona or default_roundtable_persona(model.role, model.content_type)
         return await self.llm.generate(
             model.provider_id,
             prompt,

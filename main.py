@@ -49,7 +49,7 @@ GENERATION_FAILED_TEXT = "生成失败，请配置或检查模型"
     PLUGIN_NAME,
     "Lan",
     "基于多模型圆桌会议的单人及群聊互动故事插件",
-    "0.0.1",
+    "0.0.2",
 )
 class AIInteractiveFictionPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -101,6 +101,70 @@ class AIInteractiveFictionPlugin(Star):
             async with self.store.lock:
                 await self.store.save()
 
+    @filter.command("故事", priority=1100)
+    async def story_command(self, event: AstrMessageEvent):
+        """互动故事帮助，以及开始、加入和结束故事"""
+        await self._dispatch_registered_command(event, fallback={"name": "help"})
+
+    @filter.command("存档", priority=1100)
+    async def save_command(self, event: AstrMessageEvent):
+        """将当前故事保存到个人1至4号存档槽"""
+        await self._dispatch_registered_command(event, fallback={"name": "save", "slot": None})
+
+    @filter.command("读档", priority=1100)
+    async def load_command(self, event: AstrMessageEvent):
+        """从个人1至4号存档槽读取故事，不填槽位时读取最新存档"""
+        await self._dispatch_registered_command(event, fallback={"name": "load", "slot": None})
+
+    @filter.command("圆桌会议", priority=1100)
+    async def roundtable_command(self, event: AstrMessageEvent):
+        """查看当前群聊最近一次故事行动的圆桌讨论"""
+        await self._dispatch_registered_command(event, fallback={"name": "roundtable"})
+
+    @filter.llm_tool(name="interactive_fiction")
+    async def interactive_fiction_tool(self, event: AstrMessageEvent, request: str):
+        """执行互动故事操作或玩家行动。仅当用户明确想开始、加入、结束、存读档、查看圆桌会议或推进正在游玩的故事时调用；普通聊天不要调用。
+
+        Args:
+            request(string): 用户完整的互动故事请求或玩家行动原文
+        """
+        if self.store is None or self.saves is None:
+            yield "互动故事插件尚未初始化，请稍后重试。"
+            return
+        if not self.config.enable_natural_language:
+            yield "自然语言互动未启用，请使用 /故事 查看指令。"
+            return
+        if not self.config.global_judge_provider_id:
+            yield "未配置全局判断LLM，无法执行自然语言互动故事请求。"
+            return
+
+        user_id = str(event.get_sender_id() or "").strip()
+        text = str(request or "").strip()
+        if not user_id or not text:
+            yield "缺少玩家身份或互动故事请求。"
+            return
+        await self._cleanup_if_due()
+        room = self.store.room_for_user(user_id)
+        story = StoryConfig.from_runtime_dict(room.story_config) if room else None
+        try:
+            route = await self.judge.route(
+                text,
+                active_room=room is not None,
+                pending_story_choice=user_id in self.store.pending_starts,
+                action_restriction=story.action_restriction if story else 50,
+                room_context=self._judge_room_context(room, user_id),
+            )
+        except Exception as exc:
+            logger.warning(f"互动故事函数工具调用全局判断LLM失败: {exc}")
+            yield "全局判断LLM调用失败，未执行互动故事操作。"
+            return
+        if not route or str(route.get("intent") or "chat") == "chat":
+            yield "该请求属于普通聊天，未执行互动故事操作；请直接正常回复用户。"
+            return
+
+        await self._handle_natural_route(event, user_id, text, route, room)
+        yield "互动故事操作已执行，结果已直接发送给用户，无需重复回复。"
+
     @filter.event_message_type(filter.EventMessageType.ALL, priority=1000)
     async def on_message(self, event: AstrMessageEvent):
         if self.store is None or self.saves is None:
@@ -143,6 +207,25 @@ class AIInteractiveFictionPlugin(Star):
         if not route or str(route.get("intent") or "chat") == "chat":
             return
         await self._handle_natural_route(event, user_id, text, route, room)
+
+    async def _dispatch_registered_command(
+        self,
+        event: AstrMessageEvent,
+        *,
+        fallback: dict[str, Any],
+    ) -> None:
+        """Bridge AstrBot command registration to the existing command implementation."""
+        if self.store is None or self.saves is None:
+            return
+        user_id = str(event.get_sender_id() or "").strip()
+        if not user_id or user_id == str(event.get_self_id() or ""):
+            return
+        await self._cleanup_if_due()
+        raw = str(event.get_message_str() or "").strip()
+        normalized = raw if raw.startswith(("/", "／")) else "/" + raw
+        command = self._parse_command(normalized) or fallback
+        event.stop_event()
+        await self._handle_command(event, user_id, command)
 
     async def _handle_command(self, event: AstrMessageEvent, user_id: str, command: dict[str, Any]) -> None:
         name = command["name"]
@@ -502,6 +585,7 @@ class AIInteractiveFictionPlugin(Star):
     ) -> None:
         room_id = room.room_id
         if not self.busy.try_begin(room_id):
+            await self._send_text(event, "已有玩家的行动正在处理中，请等待故事回复")
             return
         owns_room_lock = True
         try:
