@@ -21,9 +21,9 @@ python scripts/validate_release.py
 提交所有变更后创建并推送标签：
 
 ```powershell
-git tag -a v0.0.3 -m "v0.0.3"
+git tag -a v0.0.4 -m "v0.0.4"
 git push origin main
-git push origin v0.0.3
+git push origin v0.0.4
 ```
 
 标签会触发 `.github/workflows/release.yml`：
@@ -49,3 +49,7 @@ GitHub Release 成功后，前往 [AstrBot 插件发布页面](https://cloud.ast
 ## v0.0.3
 
 配置副标题、分类人设与新版帮助菜单的发布说明见 [v0.0.3](releases/v0.0.3.md)。
+
+## v0.0.4
+
+分段开局、可配置字数限制与绘图画风前缀的发布说明见 [v0.0.4](releases/v0.0.4.md)。

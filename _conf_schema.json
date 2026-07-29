@@ -50,9 +50,9 @@
           },
           "content_limit": {
             "description": "内容限制",
-            "hint": "只拼接到实际游玩行动的圆桌会议提示词开头",
+            "hint": "只拼接到实际游玩行动的圆桌会议提示词开头；字数统一在全局“字数限制”中设置",
             "type": "text",
-            "default": "常规内容（移动、道具介绍等一般性质内容）：行为＋场景介绍，不超过30字。\nNSFW：具体行动＋与对方的过程＋结果，不超过200字。\n只用第二人称“你”来称呼玩家。\n只输出行为结果，严禁自作主张做出玩家未说过的行为。"
+            "default": "只用第二人称“你”来称呼玩家。\n只输出行为结果，严禁自作主张做出玩家未说过的行为。"
           },
           "mechanisms": {
             "description": "功能机制",
@@ -211,6 +211,12 @@
             "default": "",
             "_special": "select_provider"
           },
+          "style": {
+            "description": "画风",
+            "hint": "例如“日系二次元”；非空时会作为“日系二次元画风，”添加到最终生图或改图提示词开头",
+            "type": "string",
+            "default": ""
+          },
           "priority": {"description": "优先级", "type": "int", "default": 50},
           "fake_forward_mode": {
             "description": "图片消息伪造转发",
@@ -264,6 +270,12 @@
             "default": "",
             "_special": "select_provider"
           },
+          "style": {
+            "description": "画风",
+            "hint": "例如“日系二次元”；非空时会作为“日系二次元画风，”添加到最终生图或改图提示词开头",
+            "type": "string",
+            "default": ""
+          },
           "priority": {"description": "优先级", "type": "int", "default": 50}
         }
       }
@@ -315,6 +327,49 @@
     "hint": "开启后所有文本LLM优先使用真流式；不支持时自动使用普通输出",
     "type": "bool",
     "default": true
+  },
+  "word_limits_panel": {
+    "description": "字数限制",
+    "hint": "选择“展开”显示各类最终可见内容的字数输入框；仅通过提示词约束，不硬截断模型输出",
+    "type": "string",
+    "default": "collapsed",
+    "options": ["collapsed", "expanded"],
+    "labels": ["收起", "展开"]
+  },
+  "regular_content_chars": {
+    "description": "常规内容字数",
+    "hint": "行动结果中常规叙事正文的建议上限，按最终可见字符计算",
+    "type": "int",
+    "default": 30,
+    "condition": {"word_limits_panel": "expanded"}
+  },
+  "non_safe_content_chars": {
+    "description": "非安全内容字数",
+    "hint": "行动结果中非安全叙事正文的建议上限，按最终可见字符计算",
+    "type": "int",
+    "default": 200,
+    "condition": {"word_limits_panel": "expanded"}
+  },
+  "profile_chars": {
+    "description": "个人信息字数",
+    "hint": "开局单独发送的玩家自身角色信息建议上限",
+    "type": "int",
+    "default": 120,
+    "condition": {"word_limits_panel": "expanded"}
+  },
+  "environment_chars": {
+    "description": "环境内容字数",
+    "hint": "开局单独发送的视野所及环境正文建议上限，不包含“环境：”前缀",
+    "type": "int",
+    "default": 80,
+    "condition": {"word_limits_panel": "expanded"}
+  },
+  "psychology_chars": {
+    "description": "心理描述字数",
+    "hint": "仅在全局判断模型认为确有必要时生成的心理描述建议上限",
+    "type": "int",
+    "default": 50,
+    "condition": {"word_limits_panel": "expanded"}
   },
   "unreasonable_action_message": {
     "description": "玩家不合理行为拒绝话术",

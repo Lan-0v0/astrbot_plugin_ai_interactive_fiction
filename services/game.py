@@ -5,7 +5,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from .config import DEFAULT_CONTENT_LIMIT, StoryConfig
+from .config import DEFAULT_CONTENT_LIMIT, StoryConfig, WordLimits
 from .llm import parse_json_object
 from .memory import MemoryService
 from .models import RoomMember, StoryRoom
@@ -45,9 +45,15 @@ class ActionResult:
 
 
 class GameService:
-    def __init__(self, roundtable: RoundtableService, memory: MemoryService):
+    def __init__(
+        self,
+        roundtable: RoundtableService,
+        memory: MemoryService,
+        word_limits: WordLimits | None = None,
+    ):
         self.roundtable = roundtable
         self.memory = memory
+        self.word_limits = word_limits or WordLimits()
 
     async def build_story(
         self,
@@ -154,6 +160,7 @@ class GameService:
                 forbid_player_autonomy=forbid_player_autonomy,
                 current_choices=room.current_choices,
                 include_psychology=include_psychology,
+                word_limits=self.word_limits,
             ),
             content_type=content_type,
             temperature=story.temperature,

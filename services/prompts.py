@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .config import StoryConfig
+from .config import StoryConfig, WordLimits
 
 
 def story_creation_task(
@@ -84,13 +84,26 @@ def action_task(
     forbid_player_autonomy: bool,
     current_choices: list[str],
     include_psychology: bool,
+    word_limits: WordLimits | None = None,
 ) -> str:
+    limits = word_limits or WordLimits()
+    narrative_chars = (
+        limits.non_safe_content_chars
+        if content_type == "non_safe"
+        else limits.regular_content_chars
+    )
+    if content_type == "non_safe":
+        narrative_rule = f"非安全内容：具体行动＋与对方的过程＋结果，不超过{narrative_chars}字。"
+    else:
+        narrative_rule = f"常规内容（移动、道具介绍等一般性质内容）：行为＋场景介绍，不超过{narrative_chars}字。"
     autonomy = (
         "严禁替玩家补充任何未明确说出的主动行动。只裁定当前行动产生的结果。"
         if forbid_player_autonomy
         else "不要无必要地替玩家扩展主动行动。"
     )
     return f"""{story.content_limit}
+
+本轮narrative按最终可见字符计算。{narrative_rule}该数值要求优先于旧配置中可能残留的默认字数。
 
 你要裁定一条互动故事行动。{autonomy}
 玩家只负责行动选择，行动是否成功及一切结果由你根据世界规则、当前状态和前文决定。被迫承受的事情属于结果，不属于玩家主动行动。
@@ -103,12 +116,12 @@ def action_task(
 上一轮给出的候选行动：{json.dumps(current_choices, ensure_ascii=False) if current_choices else '无'}
 行动者ID：{actor_id}
 玩家原始行动（不得改写成已成功的事实）：{action}
-本轮是否确有必要附带心理描写：{include_psychology}。即使为true也不得替玩家决定感受、意志或后续行动，且不超过50字。
+本轮是否确有必要附带心理描写：{include_psychology}。即使为true也不得替玩家决定感受、意志或后续行动，且不超过{limits.psychology_chars}字。
 
 只输出JSON对象，不加代码块：
 {{
   "narrative":"直接发给玩家的叙事正文；内容限制中的字数仅计算此字段",
-  "psychology":"通常留空；仅在被要求时给出不超过50字且不控制玩家自由意志的心理描写",
+  "psychology":"通常留空；仅在被要求时给出不超过{limits.psychology_chars}字且不控制玩家自由意志的心理描写",
   "choices":["接下来可选择的行动1","行动2","行动3"],
   "state_summary":"行动后供下一轮使用的客观世界状态",
   "death":false,
@@ -141,6 +154,7 @@ def image_prompt_task(
     mode: str,
     event_context: str,
     original_prompt: str = "",
+    style: str = "",
 ) -> str:
     if mode == "edit":
         instruction = (
@@ -149,8 +163,14 @@ def image_prompt_task(
         )
     else:
         instruction = "生成一段最高质量的单人角色立绘提示词，清楚描述脸部、发型、体型、服饰、年龄感、姿态和画风，以便后续改图保持一致。"
+    style_requirement = (
+        f"用户指定画风：{style}。生成内容不得包含与该画风冲突的风格要求。\n"
+        if style.strip()
+        else ""
+    )
     return (
         f"{instruction}\n只输出可直接提交给图片模型的提示词，不加解释。\n"
+        f"{style_requirement}"
         f"隐藏故事风格资料：{json.dumps(bible, ensure_ascii=False)}\n"
         f"角色资料：{json.dumps(character, ensure_ascii=False)}\n"
         f"当前事件：{event_context or '首次登场'}"

@@ -22,6 +22,20 @@ class GeneratedImage:
     generator: ImageGeneratorConfig
 
 
+def apply_art_style(prompt: str, style: str) -> str:
+    generated = str(prompt or "").strip().lstrip("，, ")
+    configured = str(style or "").strip().rstrip("，,。；; ")
+    if not configured:
+        return generated
+    prefix = configured if configured.endswith("画风") else f"{configured}画风"
+    if generated == prefix or any(
+        generated.startswith(prefix + separator)
+        for separator in ("，", ",", "。", " ")
+    ):
+        return generated
+    return f"{prefix}，{generated}" if generated else prefix
+
+
 class OpenAIImageRunner:
     async def generate(
         self,
@@ -209,10 +223,12 @@ class ImageService:
                         mode=mode,
                         event_context=event_context,
                         original_prompt=original_prompt,
+                        style=generator.style,
                     ),
                     system_prompt="你是专业的角色图像提示词工程师。保持人物身份和视觉一致性。",
                     timeout_seconds=timeout,
                 )
+                prompt = apply_art_style(prompt, generator.style)
                 if generator.kind == "openai":
                     path = await self.openai.generate(
                         generator,

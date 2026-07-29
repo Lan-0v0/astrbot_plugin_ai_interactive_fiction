@@ -54,7 +54,7 @@ GENERATION_FAILED_TEXT = "生成失败，请配置或检查模型"
     PLUGIN_NAME,
     "Lan",
     "基于多模型圆桌会议的单人及群聊互动故事插件",
-    "0.0.3",
+    "0.0.4",
 )
 class AIInteractiveFictionPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -84,7 +84,7 @@ class AIInteractiveFictionPlugin(Star):
             logger=logger,
         )
         self.memory = MemoryService(self.llm, logger)
-        self.game = GameService(self.roundtable, self.memory)
+        self.game = GameService(self.roundtable, self.memory, self.config.word_limits)
         self.images = ImageService(
             self.llm,
             self.config.image_generators,
@@ -378,7 +378,11 @@ class AIInteractiveFictionPlugin(Star):
                 owner_name=event.get_sender_name(),
                 content_type=content_type,
             )
-            public_text = await self.judge.render_public_profile(built.public_profile)
+            public_text, environment_text = await self._render_opening_texts(
+                bible=built.bible,
+                opening_state=built.opening_state,
+                public_profile=built.public_profile,
+            )
             room = self.game.create_room(
                 user_id,
                 event.get_sender_name(),
@@ -399,6 +403,7 @@ class AIInteractiveFictionPlugin(Star):
                 await self._send_text(event, "你已经在一个故事房间内")
                 return
             await self._send_text(event, public_text)
+            await self._send_text(event, f"环境：{environment_text}")
             await self._generate_initial_portrait(event, room, user_id, built.public_profile)
         except RoundtableConfigurationError as exc:
             await self._send_text(event, str(exc))
@@ -457,7 +462,11 @@ class AIInteractiveFictionPlugin(Star):
                 player_name=event.get_sender_name(),
                 content_type=content_type,
             )
-            public_text = await self.judge.render_public_profile(built.public_profile)
+            public_text, environment_text = await self._render_opening_texts(
+                bible=target.bible,
+                opening_state=target.world_state,
+                public_profile=built.public_profile,
+            )
             target.members[user_id] = RoomMember(
                 user_id=user_id,
                 display_name=event.get_sender_name() or "玩家",
@@ -474,6 +483,7 @@ class AIInteractiveFictionPlugin(Star):
                 self.store.pending_starts.pop(user_id, None)
                 await self.store.save()
             await self._send_text(event, public_text)
+            await self._send_text(event, f"环境：{environment_text}")
             self.busy.finish(target.room_id)
             owns_room_lock = False
             await self._generate_initial_portrait(event, target, user_id, built.public_profile)
@@ -485,6 +495,32 @@ class AIInteractiveFictionPlugin(Star):
         finally:
             if owns_room_lock:
                 self.busy.finish(room_id)
+
+    async def _render_opening_texts(
+        self,
+        *,
+        bible: dict[str, Any],
+        opening_state: str,
+        public_profile: dict[str, Any],
+    ) -> tuple[str, str]:
+        public_text = (
+            await self.judge.render_public_profile(
+                public_profile,
+                max_chars=self.config.word_limits.profile_chars,
+            )
+        ).strip()
+        environment_text = (
+            await self.judge.render_opening_environment(
+                bible=bible,
+                opening_state=opening_state,
+                profile=public_profile,
+                max_chars=self.config.word_limits.environment_chars,
+            )
+        ).strip()
+        environment_text = re.sub(r"^环境\s*[：:]\s*", "", environment_text).strip()
+        if not public_text or not environment_text:
+            raise RoundtableGenerationError(GENERATION_FAILED_TEXT)
+        return public_text, environment_text
 
     async def _end_or_leave(self, event: AstrMessageEvent, user_id: str) -> None:
         room = self.store.room_for_user(user_id)

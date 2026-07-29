@@ -176,14 +176,43 @@ class GlobalJudge:
         output = await self.llm.generate(self.provider_id, prompt, system_prompt=system)
         return parse_json_object(output)
 
-    async def render_public_profile(self, profile: dict[str, Any]) -> str:
+    async def render_public_profile(self, profile: dict[str, Any], *, max_chars: int = 120) -> str:
         prompt = (
             "把下面公开角色资料整理成玩家开局可见的简洁角色信息。"
             "只展示角色自身信息，绝不推测或透露世界观、NPC、幕后设定、剧情、任务或伏笔。"
-            "使用第二人称，不加解释，不输出JSON。\n公开角色资料：\n"
+            f"使用第二人称，按最终可见字符计算不超过{max(1, int(max_chars))}字，"
+            "不加解释，不输出JSON。\n公开角色资料：\n"
             + json.dumps(profile, ensure_ascii=False)
         )
-        return await self.llm.generate(self.provider_id, prompt, system_prompt=self.persona)
+        return await self.llm.generate(
+            self.provider_id,
+            prompt,
+            system_prompt="你负责整理互动故事开局信息。本任务只输出可直接展示给玩家的纯文本。",
+        )
+
+    async def render_opening_environment(
+        self,
+        *,
+        bible: dict[str, Any],
+        opening_state: str,
+        profile: dict[str, Any],
+        max_chars: int = 80,
+    ) -> str:
+        prompt = (
+            "根据隐藏底稿、当前开场状态和玩家角色资料，只描述玩家此刻视野所及及可直接感知的环境。"
+            "可以写地点外观、光线、声音、气味、天气和触手可及的物体；不要续写行动，不替玩家决定心理或反应。"
+            "不得解释世界观、剧情、任务、伏笔或幕后信息，也不得透露视野外NPC；"
+            "若有人确实在眼前，只能描述当下可观察到的外观与位置，不透露未知姓名、身份、意图或秘密。"
+            f"按最终可见字符计算不超过{max(1, int(max_chars))}字。只输出环境正文，不加“环境：”前缀，不输出JSON。\n"
+            f"隐藏故事底稿：{json.dumps(bible, ensure_ascii=False)}\n"
+            f"当前开场状态：{opening_state or '由底稿推断玩家当下所在位置'}\n"
+            f"玩家公开资料：{json.dumps(profile, ensure_ascii=False)}"
+        )
+        return await self.llm.generate(
+            self.provider_id,
+            prompt,
+            system_prompt="你负责提取互动故事中玩家当下可直接感知的环境。本任务只输出可展示的纯文本。",
+        )
 
     async def classify_content(self, text: str) -> str:
         prompt = (

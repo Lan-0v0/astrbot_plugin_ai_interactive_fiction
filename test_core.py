@@ -9,18 +9,21 @@ from pathlib import Path
 from unittest.mock import patch
 
 from services.config import (
+    DEFAULT_CONTENT_LIMIT,
     DEFAULT_GLOBAL_JUDGE_PERSONA,
     DEFAULT_NON_SAFE_ROUNDTABLE_PERSONA,
     DEFAULT_REGULAR_ROUNDTABLE_PERSONA,
+    LEGACY_DEFAULT_CONTENT_LIMIT,
     LEGACY_COMBINED_ROUNDTABLE_PERSONA,
     ImageGeneratorConfig,
     PluginConfig,
     RoundtableModelConfig,
     StoryConfig,
+    WordLimits,
     WorkflowNodeMapping,
 )
 from services.game import GameService
-from services.images import ImageService
+from services.images import ImageService, apply_art_style
 from services.llm import GlobalJudge
 from services.memory import MemoryService
 from services.models import RoomMember, StoryRoom
@@ -80,6 +83,29 @@ class ConfigTests(unittest.TestCase):
             {"image_generators": [{"__template_key": "comfyui", "name": "wf", "enabled": True}]}
         )
         self.assertEqual(cfg.image_generators[0].kind, "comfyui")
+
+    def test_word_limits_and_legacy_story_limit_are_migrated(self) -> None:
+        cfg = PluginConfig(
+            {
+                "regular_content_chars": 41,
+                "non_safe_content_chars": 260,
+                "profile_chars": 130,
+                "environment_chars": 90,
+                "psychology_chars": 45,
+                "stories": [{"name": "旧配置", "content_limit": LEGACY_DEFAULT_CONTENT_LIMIT}],
+            }
+        )
+        self.assertEqual(
+            cfg.word_limits,
+            WordLimits(
+                regular_content_chars=41,
+                non_safe_content_chars=260,
+                profile_chars=130,
+                environment_chars=90,
+                psychology_chars=45,
+            ),
+        )
+        self.assertEqual(cfg.stories[0].content_limit, DEFAULT_CONTENT_LIMIT)
 
     def test_roundtable_defaults_and_explicit_disable(self) -> None:
         cfg = PluginConfig(
@@ -192,6 +218,21 @@ class ConfigTests(unittest.TestCase):
             "人物首次生成使用文生图，后续CG使用缓存图改图以确保人物一致性；按优先级从高到低失败切换模型",
         )
         self.assertEqual(schema["global_judge_persona"]["default"], DEFAULT_GLOBAL_JUDGE_PERSONA)
+        self.assertEqual(schema["stories"]["templates"]["story"]["items"]["content_limit"]["default"], DEFAULT_CONTENT_LIMIT)
+        root_order = list(schema)
+        self.assertEqual(root_order[root_order.index("streaming") + 1], "word_limits_panel")
+        for key, default in {
+            "regular_content_chars": 30,
+            "non_safe_content_chars": 200,
+            "profile_chars": 120,
+            "environment_chars": 80,
+            "psychology_chars": 50,
+        }.items():
+            self.assertEqual(schema[key]["default"], default)
+            self.assertEqual(schema[key]["condition"], {"word_limits_panel": "expanded"})
+        for image_template in (templates["openai"], templates["comfyui"]):
+            image_items = list(image_template["items"])
+            self.assertEqual(image_items[image_items.index("prompt_provider_id") + 1], "style")
 
     def test_natural_slot_routing_preserves_out_of_range_numbers_for_validation(self) -> None:
         self.assertIn("即使超出1至4", GlobalJudge.ROUTE_SYSTEM)
@@ -287,6 +328,40 @@ class WorkflowTests(unittest.TestCase):
         names = [item.name for item in service._candidates(mode="edit", non_safe=True)]
         self.assertEqual(names, ["free", "local"])
 
+    def test_art_style_prefix_is_normalized(self) -> None:
+        self.assertEqual(apply_art_style("一个穿着JK制服的女生", "日系二次元"), "日系二次元画风，一个穿着JK制服的女生")
+        self.assertEqual(apply_art_style("厚涂画风，持剑角色", "厚涂画风"), "厚涂画风，持剑角色")
+        self.assertEqual(apply_art_style("角色立绘", ""), "角色立绘")
+
+
+class ImageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_configured_style_reaches_every_final_image_prompt(self) -> None:
+        for kind in ("openai", "comfyui"):
+            with self.subTest(kind=kind):
+                llm = FakeLLM()
+                raw = {"content_type": "regular", "style": "日系二次元"}
+                if kind == "comfyui":
+                    raw["support_mode"] = "generate"
+                generator = ImageGeneratorConfig(
+                    kind,
+                    "styled",
+                    True,
+                    50,
+                    "prompt-model",
+                    raw,
+                )
+                service = ImageService(llm, [generator], [], default_timeout=300, logger=Logger())
+                runner = service.openai if kind == "openai" else service.comfyui
+                runner.generate = unittest.mock.AsyncMock(return_value=Path("generated.png"))
+                result = await service.generate_character_image(
+                    bible={"tone": "青春"},
+                    character={"appearance": "JK制服"},
+                    output_dir=Path("unused"),
+                )
+                self.assertEqual(result.prompt, "日系二次元画风，output-prompt-model")
+                self.assertIn("用户指定画风：日系二次元", llm.prompts[0])
+                self.assertEqual(runner.generate.await_args.kwargs["prompt"], result.prompt)
+
 
 class FakeLLM:
     def __init__(self) -> None:
@@ -319,6 +394,25 @@ class FailingProposalLLM(FakeLLM):
 class Logger:
     def warning(self, *_args, **_kwargs) -> None:
         return None
+
+
+class JudgeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_opening_render_prompts_apply_visible_character_limits(self) -> None:
+        llm = FakeLLM()
+        judge = GlobalJudge(llm, "judge", "custom persona")
+        await judge.render_public_profile({"name": "岚"}, max_chars=111)
+        await judge.render_opening_environment(
+            bible={"secret": "hidden"},
+            opening_state="醒在房间",
+            profile={"name": "岚"},
+            max_chars=77,
+        )
+        self.assertIn("不超过111字", llm.prompts[0])
+        self.assertIn("不超过77字", llm.prompts[1])
+        self.assertIn("视野所及", llm.prompts[1])
+        self.assertIn("不得透露视野外NPC", llm.prompts[1])
+        self.assertIn("不加“环境：”前缀", llm.prompts[1])
+        self.assertNotIn("只输出JSON", llm.system_prompts[0])
 
 
 class FakeRoundtable:
@@ -451,6 +545,51 @@ class PromptTests(unittest.TestCase):
             include_psychology=False,
         )
         self.assertTrue(prompt.startswith("LIMIT"))
+        self.assertIn("不超过30字", prompt)
+
+    def test_action_prompt_uses_content_type_and_psychology_limits(self) -> None:
+        story = StoryConfig(story_id="s", name="n", enabled=True)
+        limits = WordLimits(
+            regular_content_chars=36,
+            non_safe_content_chars=240,
+            profile_chars=100,
+            environment_chars=70,
+            psychology_chars=42,
+        )
+        regular = action_task(
+            story=story,
+            bible={},
+            world_state="",
+            memory_context="",
+            characters={},
+            actor_id="u",
+            action="move",
+            content_type="regular",
+            forbid_player_autonomy=True,
+            current_choices=[],
+            include_psychology=False,
+            word_limits=limits,
+        )
+        non_safe = action_task(
+            story=story,
+            bible={},
+            world_state="",
+            memory_context="",
+            characters={},
+            actor_id="u",
+            action="attack",
+            content_type="non_safe",
+            forbid_player_autonomy=True,
+            current_choices=[],
+            include_psychology=True,
+            word_limits=limits,
+        )
+        self.assertIn("常规内容（移动、道具介绍等一般性质内容）：行为＋场景介绍", regular)
+        self.assertIn("不超过36字", regular)
+        self.assertNotIn("不超过240字", regular)
+        self.assertIn("非安全内容：具体行动＋与对方的过程＋结果", non_safe)
+        self.assertIn("不超过240字", non_safe)
+        self.assertIn("不超过42字", non_safe)
 
     def test_action_result_keeps_choices_and_string_booleans(self) -> None:
         output = RoundtableOutput(

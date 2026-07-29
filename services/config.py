@@ -4,9 +4,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-DEFAULT_CONTENT_LIMIT = (
+LEGACY_DEFAULT_CONTENT_LIMIT = (
     "常规内容（移动、道具介绍等一般性质内容）：行为＋场景介绍，不超过30字。\n"
     "NSFW：具体行动＋与对方的过程＋结果，不超过200字。\n"
+    "只用第二人称“你”来称呼玩家。\n"
+    "只输出行为结果，严禁自作主张做出玩家未说过的行为。"
+)
+
+DEFAULT_CONTENT_LIMIT = (
     "只用第二人称“你”来称呼玩家。\n"
     "只输出行为结果，严禁自作主张做出玩家未说过的行为。"
 )
@@ -133,6 +138,22 @@ def _template_key(entry: dict[str, Any], default: str) -> str:
     ).strip().lower()
 
 
+def _content_limit(value: Any) -> str:
+    configured = str(value or DEFAULT_CONTENT_LIMIT).strip()
+    if configured == LEGACY_DEFAULT_CONTENT_LIMIT:
+        return DEFAULT_CONTENT_LIMIT
+    return configured
+
+
+@dataclass(slots=True)
+class WordLimits:
+    regular_content_chars: int = 30
+    non_safe_content_chars: int = 200
+    profile_chars: int = 120
+    environment_chars: int = 80
+    psychology_chars: int = 50
+
+
 @dataclass(slots=True)
 class StoryConfig:
     story_id: str
@@ -183,7 +204,7 @@ class StoryConfig:
             world=str(raw.get("world") or ""),
             protagonist=str(raw.get("protagonist") or ""),
             required_tags=[str(item) for item in raw.get("required_tags", []) if str(item).strip()],
-            content_limit=str(raw.get("content_limit") or DEFAULT_CONTENT_LIMIT),
+            content_limit=_content_limit(raw.get("content_limit")),
             mechanisms={str(item) for item in raw.get("mechanisms", [])},
             temperature=_float(raw.get("temperature"), 1.0),
             memory_mode=str(raw.get("memory_mode") or "all"),
@@ -223,6 +244,10 @@ class ImageGeneratorConfig:
     def content_type(self) -> str:
         return str(self.raw.get("content_type") or "regular")
 
+    @property
+    def style(self) -> str:
+        return str(self.raw.get("style") or "").strip()
+
 
 @dataclass(slots=True)
 class WorkflowNodeMapping:
@@ -247,6 +272,13 @@ class PluginConfig:
         ).strip()
         self.forbid_player_autonomy = _bool(self.raw.get("forbid_player_autonomy"), True)
         self.streaming = _bool(self.raw.get("streaming"), True)
+        self.word_limits = WordLimits(
+            regular_content_chars=_int(self.raw.get("regular_content_chars"), 30, 1),
+            non_safe_content_chars=_int(self.raw.get("non_safe_content_chars"), 200, 1),
+            profile_chars=_int(self.raw.get("profile_chars"), 120, 1),
+            environment_chars=_int(self.raw.get("environment_chars"), 80, 1),
+            psychology_chars=_int(self.raw.get("psychology_chars"), 50, 1),
+        )
         self.unreasonable_action_message = str(
             self.raw.get("unreasonable_action_message") or "你想搁这开挂呢？哒咩！"
         )
@@ -285,7 +317,7 @@ class PluginConfig:
                     world=str(entry.get("world") or "").strip(),
                     protagonist=str(entry.get("protagonist") or "").strip(),
                     required_tags=tags,
-                    content_limit=str(entry.get("content_limit") or DEFAULT_CONTENT_LIMIT).strip(),
+                    content_limit=_content_limit(entry.get("content_limit")),
                     mechanisms=mechanisms,
                     temperature=_float(entry.get("temperature"), 1.0),
                     memory_mode=memory_mode,

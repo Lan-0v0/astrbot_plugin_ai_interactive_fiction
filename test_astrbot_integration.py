@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import importlib.util
 import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 ROOT = Path(__file__).resolve().parent
@@ -166,6 +167,96 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
                 include_psychology=False,
             )
         send.assert_awaited_once_with(event, "已有玩家的行动正在处理中，请等待故事回复")
+
+    async def test_start_sends_profile_environment_then_portrait(self) -> None:
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.config import WordLimits
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.game import BuiltStory
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.models import StoryRoom
+
+        class Store:
+            def __init__(self) -> None:
+                self.lock = asyncio.Lock()
+                self.rooms = {}
+                self.player_rooms = {}
+                self.rewound_users = {}
+                self.pending_starts = {}
+                self.save = AsyncMock()
+
+            def room_for_user(self, user_id: str):
+                room_id = self.player_rooms.get(user_id)
+                return self.rooms.get(room_id) if room_id else None
+
+        built = BuiltStory(
+            story=SimpleNamespace(),
+            bible={"world": "hidden"},
+            public_profile={"name": "岚"},
+            full_character={"public": {"name": "岚"}},
+            opening_state="醒在房间",
+        )
+        room = StoryRoom(
+            room_id="room-1",
+            owner_id="10001",
+            story_config={},
+            bible=built.bible,
+            members={},
+            created_at=1,
+            last_active_at=1,
+        )
+        plugin = object.__new__(self.module.AIInteractiveFictionPlugin)
+        plugin.config = SimpleNamespace(
+            global_judge_provider_id="judge",
+            word_limits=WordLimits(profile_chars=111, environment_chars=77),
+        )
+        plugin.store = Store()
+        plugin._starting_users = set()
+        plugin.judge = SimpleNamespace(
+            classify_content=AsyncMock(return_value="regular"),
+            render_public_profile=AsyncMock(return_value="个人信息"),
+            render_opening_environment=AsyncMock(return_value="环境：月光照进房间"),
+        )
+        plugin.game = SimpleNamespace(
+            build_story=AsyncMock(return_value=built),
+            create_room=MagicMock(return_value=room),
+        )
+        event = SimpleNamespace(
+            get_sender_name=lambda: "测试者",
+            unified_msg_origin="origin",
+        )
+        sent: list[tuple[str, str]] = []
+
+        async def send_text(_event, content: str) -> None:
+            sent.append(("text", content))
+
+        async def send_portrait(_event, _room, character_id: str, _profile) -> None:
+            sent.append(("image", character_id))
+
+        plugin._send_text = send_text
+        plugin._generate_initial_portrait = send_portrait
+        await plugin._create_game(
+            event,
+            "10001",
+            None,
+            "",
+            forced_random=True,
+        )
+        self.assertEqual(
+            sent,
+            [
+                ("text", "个人信息"),
+                ("text", "环境：月光照进房间"),
+                ("image", "10001"),
+            ],
+        )
+        plugin.judge.render_public_profile.assert_awaited_once_with(
+            built.public_profile,
+            max_chars=111,
+        )
+        plugin.judge.render_opening_environment.assert_awaited_once_with(
+            bible=built.bible,
+            opening_state=built.opening_state,
+            profile=built.public_profile,
+            max_chars=77,
+        )
 
 
 if __name__ == "__main__":
