@@ -11,7 +11,7 @@ import aiohttp
 
 from .config import ImageGeneratorConfig, WorkflowNodeMapping
 from .llm import LLMService
-from .prompts import image_prompt_task
+from .prompts import image_prompt_task, scene_image_prompt_task
 from .workflows import ComfyUIRunner, ImageGenerationError
 
 
@@ -250,4 +250,50 @@ class ImageService:
             except Exception as exc:
                 last_error = exc
                 self.logger.warning(f"绘图条目 {generator.name} 生成失败: {exc}")
+        raise ImageGenerationError(str(last_error or "没有可用的人物绘图条目"))
+
+    async def generate_scene_image(
+        self,
+        *,
+        bible: dict[str, Any],
+        event_context: str,
+        output_dir: Path,
+    ) -> GeneratedImage:
+        last_error: Exception | None = None
+        for generator in self._candidates(mode="generate", non_safe=False):
+            try:
+                if not generator.prompt_provider_id:
+                    raise ImageGenerationError(f"{generator.name}未配置提示词生成模型")
+                timeout = int(generator.raw.get("timeout_seconds") or -1)
+                timeout = self.default_timeout if timeout < 0 else max(1, timeout)
+                prompt = await self.llm.generate(
+                    generator.prompt_provider_id,
+                    scene_image_prompt_task(
+                        bible=bible,
+                        event_context=event_context,
+                        style=generator.style,
+                    ),
+                    system_prompt="你是专业的场景图像提示词工程师。只描绘当前可见环境。",
+                    timeout_seconds=timeout,
+                )
+                prompt = apply_art_style(prompt, generator.style)
+                if generator.kind == "openai":
+                    path = await self.openai.generate(
+                        generator,
+                        prompt=prompt,
+                        output_dir=output_dir,
+                        timeout_seconds=timeout,
+                    )
+                else:
+                    path = await self.comfyui.generate(
+                        generator,
+                        self.mappings,
+                        prompt=prompt,
+                        output_dir=output_dir,
+                        timeout_seconds=self.default_timeout,
+                    )
+                return GeneratedImage(path=path, prompt=prompt, generator=generator)
+            except Exception as exc:
+                last_error = exc
+                self.logger.warning(f"绘图条目 {generator.name} 场景生成失败: {exc}")
         raise ImageGenerationError(str(last_error or "没有可用的人物绘图条目"))

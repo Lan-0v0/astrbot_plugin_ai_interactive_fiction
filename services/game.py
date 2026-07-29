@@ -20,6 +20,7 @@ class BuiltStory:
     public_profile: dict[str, Any]
     full_character: dict[str, Any]
     opening_state: str
+    opening_choices: list[str]
 
 
 @dataclass(slots=True)
@@ -33,6 +34,7 @@ class ActionResult:
     narrative: str
     psychology: str
     choices: list[str]
+    conversation_character_id: str
     state_summary: str
     death: bool
     story_ended: bool
@@ -67,6 +69,12 @@ class GameService:
             story_creation_task(story, player_requirements=requirements, owner_name=owner_name),
             content_type=content_type,
             temperature=story.temperature if story else 1.0,
+            output_validator=_is_story_payload,
+            repair_instruction=(
+                "顶层必须是JSON对象，且必须包含对象类型的story_bible和"
+                "public_player_profile，以及恰好3项字符串的opening_choices；"
+                "同时保留private_player_profile、opening_state和runtime。"
+            ),
         )
         parsed = parse_json_object(output.final_text)
         if not parsed:
@@ -98,6 +106,7 @@ class GameService:
             public_profile=public,
             full_character=full_character,
             opening_state=str(parsed.get("opening_state") or ""),
+            opening_choices=_choice_list(parsed.get("opening_choices")),
         )
 
     async def build_join_character(
@@ -120,6 +129,11 @@ class GameService:
             ),
             content_type=content_type,
             temperature=StoryConfig.from_runtime_dict(room.story_config).temperature,
+            output_validator=_is_join_character_payload,
+            repair_instruction=(
+                "顶层必须是JSON对象，且必须包含对象类型的public_player_profile；"
+                "同时保留对象类型的private_player_profile。"
+            ),
         )
         parsed = parse_json_object(output.final_text)
         if not parsed or not isinstance(parsed.get("public_player_profile"), dict):
@@ -164,6 +178,11 @@ class GameService:
             ),
             content_type=content_type,
             temperature=story.temperature,
+            output_validator=_is_action_payload,
+            repair_instruction=(
+                "顶层必须是JSON对象并包含非空narrative。故事未死亡且未结束时choices必须恰好包含3项字符串；"
+                "死亡或结束时choices可以为空。保留状态、人物、CG和conversation_character_id字段。"
+            ),
         )
         return self._parse_action(output)
 
@@ -185,7 +204,8 @@ class GameService:
         return ActionResult(
             narrative=narrative,
             psychology=str(parsed.get("psychology") or "").strip(),
-            choices=[str(item).strip() for item in choices if str(item).strip()] if isinstance(choices, list) else [],
+            choices=_choice_list(choices),
+            conversation_character_id=str(parsed.get("conversation_character_id") or "").strip(),
             state_summary=str(parsed.get("state_summary") or ""),
             death=death,
             story_ended=_as_bool(parsed.get("story_ended"), False) and not death,
@@ -218,6 +238,7 @@ class GameService:
             created_at=now,
             last_active_at=now,
             world_state=built.opening_state,
+            current_choices=list(built.opening_choices),
             origins=[origin],
         )
 
@@ -228,6 +249,36 @@ def _safe_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     except (TypeError, ValueError):
         parsed = default
     return min(maximum, max(minimum, parsed))
+
+
+def _is_story_payload(text: str) -> bool:
+    parsed = parse_json_object(text)
+    return bool(
+        parsed
+        and isinstance(parsed.get("story_bible"), dict)
+        and isinstance(parsed.get("public_player_profile"), dict)
+        and len(_choice_list(parsed.get("opening_choices"))) == 3
+    )
+
+
+def _is_join_character_payload(text: str) -> bool:
+    parsed = parse_json_object(text)
+    return bool(parsed and isinstance(parsed.get("public_player_profile"), dict))
+
+
+def _is_action_payload(text: str) -> bool:
+    parsed = parse_json_object(text)
+    if not parsed or not str(parsed.get("narrative") or "").strip():
+        return False
+    if _as_bool(parsed.get("death"), False) or _as_bool(parsed.get("story_ended"), False):
+        return True
+    return len(_choice_list(parsed.get("choices"))) == 3
+
+
+def _choice_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()][:3]
 
 
 def _as_bool(value: Any, default: bool) -> bool:

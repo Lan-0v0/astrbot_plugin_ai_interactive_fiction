@@ -41,6 +41,9 @@ class StoryRoom:
     portraits: dict[str, dict[str, str]] = field(default_factory=dict)
     known_characters: dict[str, dict[str, Any]] = field(default_factory=dict)
     current_choices: list[str] = field(default_factory=list)
+    conversation_character_id: str = ""
+    image_trigger_history: list[str] = field(default_factory=list)
+    last_response: dict[str, Any] = field(default_factory=dict)
     origins: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -71,6 +74,11 @@ class StoryRoom:
             portraits=dict(raw.get("portraits") or {}),
             known_characters=dict(raw.get("known_characters") or {}),
             current_choices=[str(item) for item in raw.get("current_choices", []) if str(item).strip()],
+            conversation_character_id=str(raw.get("conversation_character_id") or ""),
+            image_trigger_history=[
+                str(item) for item in raw.get("image_trigger_history", []) if str(item).strip()
+            ],
+            last_response=dict(raw.get("last_response") or {}),
             origins=[str(item) for item in raw.get("origins", []) if str(item).strip()],
         )
 

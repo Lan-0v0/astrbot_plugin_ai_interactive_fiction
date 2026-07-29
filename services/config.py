@@ -50,6 +50,15 @@ DEFAULT_GLOBAL_JUDGE_PERSONA = (
     "始终严格按照当前任务要求的 JSON 结构输出，不附加解释。"
 )
 
+IMAGE_TRIGGER_TYPES = {
+    "first_appearance",
+    "first_conversation",
+    "killing",
+    "violation",
+    "scene_change",
+    "battle_damage",
+}
+
 
 def default_roundtable_persona(role: str, content_type: str) -> str:
     """Return a role- and content-aware fallback for empty legacy configs."""
@@ -272,6 +281,15 @@ class PluginConfig:
         ).strip()
         self.forbid_player_autonomy = _bool(self.raw.get("forbid_player_autonomy"), True)
         self.streaming = _bool(self.raw.get("streaming"), True)
+        configured_triggers = self.raw.get("image_generation_triggers")
+        if configured_triggers is None:
+            configured_triggers = list(IMAGE_TRIGGER_TYPES)
+        if isinstance(configured_triggers, str):
+            configured_triggers = [configured_triggers]
+        self.image_generation_triggers = {
+            str(item) for item in (configured_triggers or [])
+            if str(item) in IMAGE_TRIGGER_TYPES
+        }
         self.word_limits = WordLimits(
             regular_content_chars=_int(self.raw.get("regular_content_chars"), 30, 1),
             non_safe_content_chars=_int(self.raw.get("non_safe_content_chars"), 200, 1),

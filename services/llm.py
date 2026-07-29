@@ -18,15 +18,21 @@ def parse_json_object(text: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         pass
 
-    start = candidate.find("{")
-    end = candidate.rfind("}")
-    if start < 0 or end <= start:
-        return None
-    try:
-        parsed = json.loads(candidate[start : end + 1])
-    except json.JSONDecodeError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
+    # Models sometimes surround the requested object with an explanation or
+    # emit more than one JSON value. Decode balanced objects instead of taking
+    # everything between the first "{" and the last "}", which corrupts both
+    # cases. Prefer the largest object because it is normally the requested
+    # outer payload rather than one of its nested fields.
+    decoder = json.JSONDecoder()
+    objects: list[tuple[int, dict[str, Any]]] = []
+    for match in re.finditer(r"\{", candidate):
+        try:
+            parsed, consumed = decoder.raw_decode(candidate[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            objects.append((consumed, parsed))
+    return max(objects, key=lambda item: item[0])[1] if objects else None
 
 
 @dataclass(slots=True)
@@ -98,7 +104,7 @@ class LLMService:
             return ""
 
         last_complete = ""
-        chunks: list[str] = []
+        chunk_text = ""
         async for response in stream_method(
             prompt=prompt,
             system_prompt=system_prompt or None,
@@ -108,10 +114,27 @@ class LLMService:
             if not text:
                 continue
             if bool(getattr(response, "is_chunk", False)):
-                chunks.append(text)
+                # AstrBot providers normally yield deltas. Some compatible
+                # providers instead mark a cumulative snapshot as a chunk.
+                # Supporting both prevents duplicated or truncated JSON.
+                if text.startswith(chunk_text):
+                    chunk_text = text
+                else:
+                    chunk_text += text
             else:
                 last_complete = text
-        return (last_complete or "".join(chunks)).strip()
+        if not last_complete:
+            return chunk_text.strip()
+        if not chunk_text:
+            return last_complete.strip()
+        # A few OpenAI-compatible gateways mark only the final delta as a
+        # complete response. Append it unless it was already emitted as the
+        # last chunk. AstrBot's normal full final response is handled above.
+        if last_complete.strip() == chunk_text.strip() or last_complete.startswith(chunk_text):
+            return last_complete.strip()
+        if chunk_text.endswith(last_complete):
+            return chunk_text.strip()
+        return (chunk_text + last_complete).strip()
 
     async def describe_provider(self, provider_id: str) -> ProviderDescription:
         try:
@@ -247,3 +270,53 @@ class GlobalJudge:
             else str(allowed_raw).strip().lower() in {"true", "1", "yes", "是"}
         )
         return allowed, str(parsed.get("reason") or "角色要求与当前故事不匹配")
+
+    async def detect_image_triggers(
+        self,
+        *,
+        action: str,
+        narrative: str,
+        known_characters: dict[str, Any],
+        new_characters: list[dict[str, Any]],
+        changed_characters: list[dict[str, Any]],
+        enabled_triggers: set[str],
+    ) -> list[dict[str, str]]:
+        if not enabled_triggers:
+            return []
+        prompt = (
+            "判断本轮故事结果实际满足哪些图像生成时机。只选择配置允许的类型，不续写故事。"
+            "first_appearance=人物首次登场；first_conversation=某人物与玩家首次实际对话；"
+            "killing=本轮发生杀害；violation=本轮发生侵犯；scene_change=主角从一个场景移动到另一个场景；"
+            "battle_damage=人物受伤后需要通过衣物、丝袜等穿戴品破损造成的露肤度、表情或姿势表现战损。"
+            "character_id必须使用给定稳定ID，场景变换可留空；description简述供生图使用的可见画面。"
+            "只输出JSON：{\"triggers\":[{\"type\":\"scene_change\",\"character_id\":\"\",\"description\":\"画面说明\"}]}\n"
+            f"允许类型：{json.dumps(sorted(enabled_triggers), ensure_ascii=False)}\n"
+            f"玩家行动：{action}\n故事结果：{narrative}\n"
+            f"已知人物：{json.dumps(known_characters, ensure_ascii=False)}\n"
+            f"本轮新人物：{json.dumps(new_characters, ensure_ascii=False)}\n"
+            f"本轮变化人物：{json.dumps(changed_characters, ensure_ascii=False)}"
+        )
+        output = await self.llm.generate(
+            self.provider_id,
+            prompt,
+            system_prompt=self.persona or self.ROUTE_SYSTEM,
+        )
+        parsed = parse_json_object(output) or {}
+        items = parsed.get("triggers")
+        if not isinstance(items, list):
+            return []
+        result: list[dict[str, str]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            trigger_type = str(item.get("type") or "")
+            if trigger_type not in enabled_triggers:
+                continue
+            result.append(
+                {
+                    "type": trigger_type,
+                    "character_id": str(item.get("character_id") or "").strip(),
+                    "description": str(item.get("description") or narrative).strip(),
+                }
+            )
+        return result

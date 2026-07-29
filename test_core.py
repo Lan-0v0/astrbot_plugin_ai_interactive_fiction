@@ -24,7 +24,7 @@ from services.config import (
 )
 from services.game import GameService
 from services.images import ImageService, apply_art_style
-from services.llm import GlobalJudge
+from services.llm import GlobalJudge, LLMService, parse_json_object
 from services.memory import MemoryService
 from services.models import RoomMember, StoryRoom
 from services.prompts import action_task
@@ -187,8 +187,15 @@ class ConfigTests(unittest.TestCase):
             "comfyui": schema["image_generators"]["templates"]["comfyui"],
             "mapping": schema["workflow_node_mappings"]["templates"]["mapping"],
         }
-        for template in templates.values():
-            self.assertEqual(template["display_item"], "name")
+        for key, template in templates.items():
+            if key == "roundtable":
+                self.assertEqual(
+                    template["display_item"],
+                    ["name", "role_display", "content_type_display"],
+                )
+                self.assertEqual(template["display_item_separator"], "——")
+            else:
+                self.assertEqual(template["display_item"], "name")
             self.assertTrue(template["hide_hint_in_list"])
             self.assertEqual(template["items"]["name"]["type"], "string")
         roundtable_items = templates["roundtable"]["items"]
@@ -218,6 +225,17 @@ class ConfigTests(unittest.TestCase):
             "人物首次生成使用文生图，后续CG使用缓存图改图以确保人物一致性；按优先级从高到低失败切换模型",
         )
         self.assertEqual(schema["global_judge_persona"]["default"], DEFAULT_GLOBAL_JUDGE_PERSONA)
+        self.assertEqual(
+            schema["image_generation_triggers"]["default"],
+            [
+                "first_appearance",
+                "first_conversation",
+                "killing",
+                "violation",
+                "scene_change",
+                "battle_damage",
+            ],
+        )
         self.assertEqual(schema["stories"]["templates"]["story"]["items"]["content_limit"]["default"], DEFAULT_CONTENT_LIMIT)
         root_order = list(schema)
         self.assertEqual(root_order[root_order.index("streaming") + 1], "word_limits_panel")
@@ -362,6 +380,27 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("用户指定画风：日系二次元", llm.prompts[0])
                 self.assertEqual(runner.generate.await_args.kwargs["prompt"], result.prompt)
 
+    async def test_scene_image_uses_scene_prompt_and_generate_model(self) -> None:
+        llm = FakeLLM()
+        generator = ImageGeneratorConfig(
+            "openai",
+            "scene",
+            True,
+            50,
+            "prompt-model",
+            {"content_type": "regular", "style": "电影感", "api_keys": ["test"]},
+        )
+        service = ImageService(llm, [generator], [], default_timeout=300, logger=Logger())
+        service.openai.generate = unittest.mock.AsyncMock(return_value=Path("scene.png"))
+        result = await service.generate_scene_image(
+            bible={"tone": "悬疑"},
+            event_context="你从走廊进入大厅",
+            output_dir=Path("unused"),
+        )
+        self.assertEqual(result.path, Path("scene.png"))
+        self.assertIn("环境全景", llm.prompts[0])
+        self.assertIn("你从走廊进入大厅", llm.prompts[0])
+
 
 class FakeLLM:
     def __init__(self) -> None:
@@ -414,6 +453,72 @@ class JudgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不加“环境：”前缀", llm.prompts[1])
         self.assertNotIn("只输出JSON", llm.system_prompts[0])
 
+    async def test_image_trigger_detection_filters_unconfigured_types(self) -> None:
+        class TriggerLLM(FakeLLM):
+            async def generate(self, provider_id: str, prompt: str, **kwargs) -> str:
+                self.prompts.append(prompt)
+                return json.dumps(
+                    {
+                        "triggers": [
+                            {"type": "scene_change", "character_id": "", "description": "进入大厅"},
+                            {"type": "killing", "character_id": "npc", "description": "不应保留"},
+                        ]
+                    },
+                    ensure_ascii=False,
+                )
+
+        llm = TriggerLLM()
+        judge = GlobalJudge(llm, "judge")
+        triggers = await judge.detect_image_triggers(
+            action="进入大厅",
+            narrative="你推门进入大厅",
+            known_characters={},
+            new_characters=[],
+            changed_characters=[],
+            enabled_triggers={"scene_change"},
+        )
+        self.assertEqual(
+            triggers,
+            [{"type": "scene_change", "character_id": "", "description": "进入大厅"}],
+        )
+        self.assertIn("场景变换", llm.prompts[0])
+
+
+class StructuredOutputTests(unittest.IsolatedAsyncioTestCase):
+    def test_json_parser_extracts_largest_balanced_object(self) -> None:
+        parsed = parse_json_object(
+            '说明 {"status":"draft"}\n最终结果：'
+            '{"story_bible":{"title":"测试"},"public_player_profile":{"name":"玩家"}}\n结束'
+        )
+        self.assertEqual(parsed["story_bible"]["title"], "测试")
+        self.assertEqual(parsed["public_player_profile"]["name"], "玩家")
+
+    async def test_stream_accepts_cumulative_chunks_and_trailing_delta(self) -> None:
+        class Response:
+            def __init__(self, text: str, is_chunk: bool) -> None:
+                self.completion_text = text
+                self.is_chunk = is_chunk
+
+        class Provider:
+            async def text_chat_stream(self, **_kwargs):
+                yield Response('{"story_bible"', True)
+                yield Response('{"story_bible":{}', True)
+                yield Response(',"public_player_profile":{}}', False)
+
+        class ProviderManager:
+            async def get_provider_by_id(self, _provider_id: str):
+                return Provider()
+
+        class Context:
+            provider_manager = ProviderManager()
+
+        service = LLMService(Context(), streaming=True, default_timeout=30, logger=Logger())
+        output = await service._generate_stream("provider", "prompt", "", {})
+        self.assertEqual(
+            parse_json_object(output),
+            {"story_bible": {}, "public_player_profile": {}},
+        )
+
 
 class FakeRoundtable:
     def __init__(self, payload: dict) -> None:
@@ -433,6 +538,7 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
                 "public_player_profile": {"name": "玩家"},
                 "private_player_profile": {"secret": "x"},
                 "opening_state": "醒来",
+                "opening_choices": ["观察", "等待", "前进"],
                 "runtime": {"expected_minutes": 26, "save_enabled": True},
             }
         )
@@ -447,6 +553,7 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(built.story.expected_minutes, 26)
         self.assertTrue(built.story.save_enabled)
         self.assertEqual(built.opening_state, "醒来")
+        self.assertEqual(built.opening_choices, ["观察", "等待", "前进"])
         self.assertIn("主角是女性", roundtable.calls[0]["task"])
 
 
@@ -504,6 +611,68 @@ class RoundtableTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("暴力", llm.system_prompts[0])
         self.assertIn("性内容", llm.system_prompts[0])
         self.assertIn("最终评审", llm.system_prompts[-1])
+
+    async def test_invalid_final_reviewer_is_repaired_once(self) -> None:
+        class RepairingLLM(FakeLLM):
+            async def generate(self, provider_id: str, prompt: str, **kwargs) -> str:
+                self.calls.append(provider_id)
+                self.prompts.append(prompt)
+                self.system_prompts.append(str(kwargs.get("system_prompt") or ""))
+                if provider_id == "p":
+                    return "proposal"
+                if "上一次的输出未通过" in prompt:
+                    self.repair_temperature = kwargs.get("temperature")
+                    return '{"story_bible":{},"public_player_profile":{}}'
+                return '{"story_bible":{}}'
+
+        models = [
+            RoundtableModelConfig("p", True, 1, "proposal", "regular", "p", "", -1),
+            RoundtableModelConfig("r", True, 1, "reviewer", "regular", "r", "", -1),
+        ]
+        llm = RepairingLLM()
+        service = RoundtableService(llm, models, mode="sequential", rounds=1, logger=Logger())
+        validator = lambda text: bool(
+            (parsed := parse_json_object(text))
+            and isinstance(parsed.get("story_bible"), dict)
+            and isinstance(parsed.get("public_player_profile"), dict)
+        )
+        output = await service.run(
+            "task",
+            output_validator=validator,
+            repair_instruction="required schema",
+        )
+        self.assertTrue(validator(output.final_text))
+        self.assertEqual(llm.calls, ["p", "r", "r"])
+        self.assertEqual(llm.repair_temperature, 0.0)
+        self.assertIn("结构要求：\nrequired schema", llm.prompts[-1])
+        self.assertTrue(output.discussion[-1]["label"].endswith("（格式修复）"))
+
+    async def test_failed_repair_falls_back_to_prior_valid_reviewer(self) -> None:
+        class FallbackLLM(FakeLLM):
+            async def generate(self, provider_id: str, prompt: str, **kwargs) -> str:
+                self.calls.append(provider_id)
+                self.prompts.append(prompt)
+                if provider_id == "p":
+                    return "proposal"
+                if provider_id == "r-low":
+                    return '{"required":true}'
+                return '{"wrong":true}'
+
+        models = [
+            RoundtableModelConfig("p", True, 1, "proposal", "regular", "p", "", -1),
+            RoundtableModelConfig("r-low", True, 10, "reviewer", "regular", "r-low", "", -1),
+            RoundtableModelConfig("r-high", True, 90, "reviewer", "regular", "r-high", "", -1),
+        ]
+        llm = FallbackLLM()
+        service = RoundtableService(llm, models, mode="sequential", rounds=1, logger=Logger())
+        with patch("services.roundtable.random.shuffle", side_effect=lambda value: None):
+            output = await service.run(
+                "task",
+                output_validator=lambda text: bool((parse_json_object(text) or {}).get("required")),
+                repair_instruction="required schema",
+            )
+        self.assertEqual(output.final_text, '{"required":true}')
+        self.assertEqual(llm.calls, ["p", "r-low", "r-high", "r-high"])
 
 
 class MemoryTests(unittest.IsolatedAsyncioTestCase):
@@ -600,6 +769,7 @@ class PromptTests(unittest.TestCase):
                     "death": "true",
                     "story_ended": "true",
                     "major_node": "true",
+                    "conversation_character_id": "npc-1",
                 },
                 ensure_ascii=False,
             ),
@@ -610,6 +780,25 @@ class PromptTests(unittest.TestCase):
         self.assertTrue(parsed.death)
         self.assertFalse(parsed.story_ended)
         self.assertTrue(parsed.major_node)
+        self.assertEqual(parsed.conversation_character_id, "npc-1")
+
+
+class NewFeatureTests(unittest.TestCase):
+    def test_image_trigger_defaults_and_explicit_empty_disable(self) -> None:
+        default = PluginConfig({})
+        self.assertEqual(
+            default.image_generation_triggers,
+            {
+                "first_appearance",
+                "first_conversation",
+                "killing",
+                "violation",
+                "scene_change",
+                "battle_damage",
+            },
+        )
+        self.assertEqual(PluginConfig({"image_generation_triggers": []}).image_generation_triggers, set())
+
 
 
 if __name__ == "__main__":

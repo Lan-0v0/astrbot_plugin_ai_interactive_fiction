@@ -110,7 +110,8 @@
     "templates": {
       "model": {
         "name": "圆桌模型",
-        "display_item": "name",
+        "display_item": ["name", "role_display", "content_type_display"],
+        "display_item_separator": "——",
         "hide_hint_in_list": true,
         "items": {
           "name": {"description": "名称", "type": "string", "default": "圆桌成员"},
@@ -140,6 +141,18 @@
             "default": "regular",
             "options": ["regular", "non_safe"],
             "labels": ["常规", "非安全"]
+          },
+          "role_display": {
+            "description": "身份显示值",
+            "type": "string",
+            "default": "提案",
+            "invisible": true
+          },
+          "content_type_display": {
+            "description": "内容类型显示值",
+            "type": "string",
+            "default": "常规",
+            "invisible": true
           },
           "regular_persona": {
             "description": "常规内容人设提示词",
@@ -181,6 +194,14 @@
     "type": "int",
     "default": 1,
     "condition": {"discussion_mode": "sequential"}
+  },
+  "image_generation_triggers": {
+    "description": "图像生成时机",
+    "hint": "满足勾选的故事时机后，在后台判断并生成图片，不阻塞故事正文发送",
+    "type": "list",
+    "default": ["first_appearance", "first_conversation", "killing", "violation", "scene_change", "battle_damage"],
+    "options": ["first_appearance", "first_conversation", "killing", "violation", "scene_change", "battle_damage"],
+    "labels": ["人物首次登场", "人物首次对话", "杀害", "侵犯", "场景变换", "人物战损"]
   },
   "image_generators": {
     "description": "人物绘图条目",

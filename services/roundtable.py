@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -68,6 +69,8 @@ class RoundtableService:
         *,
         content_type: str = "regular",
         temperature: float = 1.0,
+        output_validator: Callable[[str], bool] | None = None,
+        repair_instruction: str = "",
     ) -> RoundtableOutput:
         proposers = self._select_role("proposal", content_type)
         reviewers = self._select_role("reviewer", content_type)
@@ -117,6 +120,9 @@ class RoundtableService:
         review_context = list(proposal_context)
         final_text = ""
         reviewer_success = False
+        last_valid_text = ""
+        last_reviewer: RoundtableModelConfig | None = None
+        last_invalid_text = ""
         for model in reviewers:
             try:
                 text = await self._call_model(
@@ -132,13 +138,75 @@ class RoundtableService:
                 continue
             reviewer_success = True
             final_text = text
+            last_reviewer = model
             label = await self._label(model)
             discussion.append({"label": label, "content": text})
             review_context.append(f"评审 {label}：{text}")
+            if output_validator is None or self._is_valid_output(output_validator, text):
+                last_valid_text = text
+                last_invalid_text = ""
+            else:
+                last_invalid_text = text
+                self.logger.warning(f"{label} 返回了非空内容，但输出格式不符合任务要求")
 
         if not reviewer_success:
             raise RoundtableGenerationError("生成失败，请配置或检查模型")
+        if output_validator is not None and not self._is_valid_output(output_validator, final_text):
+            repaired = await self._repair_structured_output(
+                model=last_reviewer,
+                task=task,
+                invalid_text=last_invalid_text or final_text,
+                instruction=repair_instruction,
+                validator=output_validator,
+                discussion=discussion,
+            )
+            if repaired:
+                final_text = repaired
+            elif last_valid_text:
+                self.logger.warning("最终评审格式修复失败，回退到最近一个结构有效的评审结果")
+                final_text = last_valid_text
+            else:
+                raise RoundtableGenerationError("模型均未返回符合要求的结构化内容")
         return RoundtableOutput(final_text=final_text, discussion=discussion)
+
+    @staticmethod
+    def _is_valid_output(validator: Callable[[str], bool], text: str) -> bool:
+        try:
+            return bool(validator(text))
+        except Exception:
+            return False
+
+    async def _repair_structured_output(
+        self,
+        *,
+        model: RoundtableModelConfig | None,
+        task: str,
+        invalid_text: str,
+        instruction: str,
+        validator: Callable[[str], bool],
+        discussion: list[dict[str, str]],
+    ) -> str:
+        if model is None or not invalid_text.strip():
+            return ""
+        prompt = (
+            f"{task}\n\n"
+            "你上一次的输出未通过插件的结构校验。请只修复格式和缺失字段，保留原有故事事实，"
+            "并重新输出一个完整JSON对象。不要使用Markdown代码块，不要解释。\n"
+            f"结构要求：\n{instruction or '严格遵循原任务规定的JSON结构。'}\n\n"
+            f"上一次输出：\n{invalid_text}"
+        )
+        try:
+            repaired = await self._call_model(model, prompt, 0.0)
+        except Exception as exc:
+            await self._log_failure(model, exc)
+            return ""
+        label = await self._label(model)
+        if repaired:
+            discussion.append({"label": f"{label}（格式修复）", "content": repaired})
+        if repaired and self._is_valid_output(validator, repaired):
+            return repaired
+        self.logger.warning(f"{label} 格式修复后仍不符合任务要求")
+        return ""
 
     async def _call_model(self, model: RoundtableModelConfig, prompt: str, temperature: float) -> str:
         system = model.persona or default_roundtable_persona(model.role, model.content_type)

@@ -48,9 +48,10 @@ def story_creation_task(
   "public_player_profile": {{"name":"角色名","age":"年龄","appearance":"外貌服饰","identity":"仅角色自己知道且不泄露世界的身份信息","abilities":"自身能力","inventory":"自身初始持有物"}},
   "private_player_profile": {{"background":"不公开背景","story_links":"与隐藏剧情的联系"}},
   "opening_state": "供后续故事模型使用的隐藏开场状态，不直接展示",
+  "opening_choices": ["开局可采取的行动1","开局可采取的行动2","开局可采取的行动3"],
   "runtime": {{"expected_minutes":20,"save_enabled":true}}
 }}
-必要标签必须真实进入底稿。public_player_profile只能包含角色自身可知信息。"""
+必要标签必须真实进入底稿。public_player_profile只能包含角色自身可知信息。opening_choices必须恰好给出3项由剧情生成的合理行动。"""
 
 
 def join_character_task(
@@ -123,6 +124,7 @@ def action_task(
   "narrative":"直接发给玩家的叙事正文；内容限制中的字数仅计算此字段",
   "psychology":"通常留空；仅在被要求时给出不超过{limits.psychology_chars}字且不控制玩家自由意志的心理描写",
   "choices":["接下来可选择的行动1","行动2","行动3"],
+  "conversation_character_id":"当前正与玩家交谈的人物稳定ID；无人交谈时留空",
   "state_summary":"行动后供下一轮使用的客观世界状态",
   "death":false,
   "story_ended":false,
@@ -132,7 +134,7 @@ def action_task(
   "cg_trigger":"none|violation|killing",
   "cg_character_id":"相关角色稳定ID"
 }}
-以候选行动选项为主，choices通常给出2至4项并固定显示；玩家仍可不选这些选项而自由描述合理行动。死亡或故事自然结束时choices留空。
+故事继续时choices必须恰好给出3项由剧情生成的候选行动；玩家仍可不选这些选项而自由描述合理行动。死亡或故事自然结束时choices留空。
 侵犯或杀害行动本身不得强制结束故事；产生结果后，若目标和情境仍允许，应继续给出与同一角色互动的其他候选行动及结束当前互动的选择。
 玩家死亡时只设置death=true，不要设置story_ended=true，后续由玩家自行选择读档或结束故事。
 new_characters仅列本轮第一次正式登场的角色。年龄或服饰有较大变化时才写changed_characters。死亡时narrative中不要写英文死亡提示，插件会单独追加。"""
@@ -174,4 +176,20 @@ def image_prompt_task(
         f"隐藏故事风格资料：{json.dumps(bible, ensure_ascii=False)}\n"
         f"角色资料：{json.dumps(character, ensure_ascii=False)}\n"
         f"当前事件：{event_context or '首次登场'}"
+    )
+
+
+def scene_image_prompt_task(*, bible: dict[str, Any], event_context: str, style: str = "") -> str:
+    style_requirement = (
+        f"用户指定画风：{style}。生成内容不得包含与该画风冲突的风格要求。\n"
+        if style.strip()
+        else ""
+    )
+    return (
+        "生成一段最高质量的场景图提示词，准确表现玩家刚进入的新场景、空间结构、光线、天气、"
+        "可见物体和当前氛围。重点是环境全景，不要擅自添加不可见角色或泄露隐藏剧情。"
+        "只输出可直接提交给图片模型的提示词，不加解释。\n"
+        f"{style_requirement}"
+        f"隐藏故事风格资料：{json.dumps(bible, ensure_ascii=False)}\n"
+        f"场景变换内容：{event_context}"
     )

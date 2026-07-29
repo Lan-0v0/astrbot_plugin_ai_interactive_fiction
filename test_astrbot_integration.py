@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import importlib.util
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -71,6 +72,9 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
         parse = self.module.AIInteractiveFictionPlugin._parse_command
         self.assertEqual(parse("/故事"), {"name": "help"})
         self.assertEqual(parse("/故事 开始 主角是女性"), {"name": "start", "args": "主角是女性"})
+        self.assertEqual(parse("/故事 继续"), {"name": "continue"})
+        self.assertEqual(parse("/故事 2"), {"name": "action", "args": "2"})
+        self.assertEqual(parse("/故事 杀害"), {"name": "action", "args": "杀害"})
         self.assertEqual(parse("/存档 5"), {"name": "save", "slot": "5"})
         self.assertEqual(parse("/读档 1"), {"name": "load", "slot": "1"})
         self.assertEqual(parse("/圆桌会议"), {"name": "roundtable"})
@@ -81,6 +85,8 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
             """Game Start：
 /故事 开始 [要求]
 /故事 加入@房主 [角色要求]
+/故事 继续
+/故事 [选项或行动]
 /故事 结束
 
 存档与读档（有4个槽位）：
@@ -90,7 +96,7 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
 查看最近AI之间的剧情讨论：
 /圆桌会议
 
-启用自然语言后，操作和游玩行动也可直接 @我 用正常说话表达。""",
+进入故事后，启用自然语言时也可直接 @我 用正常说话表达行动。""",
         )
 
     async def test_registered_command_bridge_handles_astrbot_stripped_prefix(self) -> None:
@@ -139,6 +145,220 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
         plugin.config = SimpleNamespace(enable_natural_language=False)
         output = [item async for item in plugin.interactive_fiction_tool(object(), "开始故事")]
         self.assertEqual(output, ["自然语言互动未启用，请使用 /故事 查看指令。"])
+
+    async def test_llm_tool_does_not_route_before_game_starts(self) -> None:
+        class Store:
+            pending_starts = {}
+
+            @staticmethod
+            def room_for_user(_user_id):
+                return None
+
+        plugin = object.__new__(self.module.AIInteractiveFictionPlugin)
+        plugin.store = Store()
+        plugin.saves = object()
+        plugin.config = SimpleNamespace(
+            enable_natural_language=True,
+            global_judge_provider_id="judge",
+        )
+        plugin.judge = SimpleNamespace(route=AsyncMock())
+        plugin._cleanup_if_due = AsyncMock()
+        event = SimpleNamespace(get_sender_id=lambda: "10001")
+        output = [item async for item in plugin.interactive_fiction_tool(event, "开始一局故事")]
+        self.assertEqual(
+            output,
+            ["请先使用 /故事 开始 进入故事；未开局时不会调用自然语言判断。"],
+        )
+        plugin.judge.route.assert_not_awaited()
+
+    async def test_message_router_skips_judge_before_game_starts(self) -> None:
+        class Store:
+            pending_starts = {}
+
+            @staticmethod
+            def room_for_user(_user_id):
+                return None
+
+        plugin = object.__new__(self.module.AIInteractiveFictionPlugin)
+        plugin.store = Store()
+        plugin.saves = object()
+        plugin.config = SimpleNamespace(
+            enable_natural_language=True,
+            global_judge_provider_id="judge",
+        )
+        plugin.judge = SimpleNamespace(route=AsyncMock())
+        plugin._cleanup_if_due = AsyncMock()
+        event = SimpleNamespace(
+            get_sender_id=lambda: "10001",
+            get_self_id=lambda: "20002",
+            get_message_str=lambda: "今天天气怎么样",
+        )
+        await plugin.on_message(event)
+        plugin.judge.route.assert_not_awaited()
+
+    def test_choice_format_and_numeric_resolution(self) -> None:
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.models import StoryRoom
+
+        plugin_type = self.module.AIInteractiveFictionPlugin
+        self.assertEqual(
+            plugin_type._format_choices(["甲", "乙", "丙"], False),
+            "1. 甲\n2. 乙\n3. 丙\n4. 可自由使用“/故事 [行动]”或 @我 行动",
+        )
+        self.assertEqual(
+            plugin_type._format_choices(["甲", "乙", "丙"], True),
+            "1. 甲\n2. 乙\n3. 丙\n4. 杀害\n5. 侵犯\n6. 可自由使用“/故事 [行动]”或 @我 行动",
+        )
+        room = StoryRoom(
+            room_id="room",
+            owner_id="owner",
+            story_config={},
+            bible={},
+            members={},
+            created_at=1,
+            last_active_at=1,
+            current_choices=["甲", "乙", "丙"],
+            conversation_character_id="npc-1",
+        )
+        self.assertEqual(plugin_type._resolve_command_action(room, "2"), "乙")
+        self.assertIn("npc-1", plugin_type._resolve_command_action(room, "4"))
+        self.assertIn("npc-1", plugin_type._resolve_command_action(room, "侵犯"))
+
+    async def test_continue_replays_cached_text(self) -> None:
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.models import StoryRoom
+
+        room = StoryRoom(
+            room_id="room",
+            owner_id="owner",
+            story_config={},
+            bible={},
+            members={},
+            created_at=1,
+            last_active_at=1,
+            last_response={"turn": 1, "text": "结果\n\n1. 前进", "images": []},
+        )
+        plugin = object.__new__(self.module.AIInteractiveFictionPlugin)
+        plugin.store = SimpleNamespace(room_for_user=lambda _user_id: room)
+        event = object()
+        with patch.object(plugin, "_send_text", AsyncMock()) as send:
+            await plugin._continue_last_response(event, "owner")
+        send.assert_awaited_once_with(event, "结果\n\n1. 前进")
+
+    async def test_continue_replays_completed_images(self) -> None:
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.models import StoryRoom
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "result.png"
+            image_path.write_bytes(b"image")
+            room = StoryRoom(
+                room_id="room",
+                owner_id="owner",
+                story_config={},
+                bible={},
+                members={},
+                created_at=1,
+                last_active_at=1,
+                last_response={
+                    "turn": 1,
+                    "text": "结果",
+                    "images": [{"path": str(image_path)}],
+                },
+            )
+            plugin = object.__new__(self.module.AIInteractiveFictionPlugin)
+            plugin.store = SimpleNamespace(room_for_user=lambda _user_id: room)
+            with (
+                patch.object(plugin, "_send_text", AsyncMock()),
+                patch.object(self.module, "send_cached_image", AsyncMock(return_value=True)) as send_image,
+            ):
+                await plugin._continue_last_response(object(), "owner")
+            send_image.assert_awaited_once_with(unittest.mock.ANY, image_path)
+
+    async def test_action_caches_reply_and_spawns_image_work_without_waiting(self) -> None:
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.config import StoryConfig
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.game import ActionResult
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.models import RoomMember, StoryRoom
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.storage import RoomBusyRegistry
+
+        member = RoomMember("owner", "玩家", {"public": {"name": "玩家"}}, 0, "origin")
+        room = StoryRoom(
+            room_id="room",
+            owner_id="owner",
+            story_config=StoryConfig("story", "测试", enabled=True).to_runtime_dict(),
+            bible={},
+            members={"owner": member},
+            created_at=1,
+            last_active_at=1,
+        )
+
+        class Store:
+            def __init__(self):
+                self.rooms = {"room": room}
+                self.lock = asyncio.Lock()
+                self.save = AsyncMock()
+
+        result = ActionResult(
+            narrative="你推开门。",
+            psychology="",
+            choices=["进入", "观察", "返回"],
+            conversation_character_id="npc-1",
+            state_summary="门已打开",
+            death=False,
+            story_ended=False,
+            major_node=False,
+            new_characters=[],
+            changed_characters=[],
+            cg_trigger="none",
+            cg_character_id="",
+            discussion=[],
+        )
+        plugin = object.__new__(self.module.AIInteractiveFictionPlugin)
+        plugin.store = Store()
+        plugin.busy = RoomBusyRegistry()
+        plugin.game = SimpleNamespace(act=AsyncMock(return_value=result))
+        plugin.memory = SimpleNamespace(compress_if_needed=AsyncMock(return_value=False))
+        plugin.saves = SimpleNamespace(auto_save=MagicMock())
+        plugin.config = SimpleNamespace(
+            forbid_player_autonomy=True,
+            image_generation_triggers=set(),
+        )
+        plugin._send_text = AsyncMock()
+        spawned: list[object] = []
+
+        def capture_background(coroutine):
+            spawned.append(coroutine)
+            coroutine.close()
+
+        plugin._spawn_background = capture_background
+        event = SimpleNamespace(unified_msg_origin="origin")
+        await plugin._perform_action(
+            event,
+            "owner",
+            room,
+            "推门",
+            "regular",
+            include_psychology=False,
+        )
+        self.assertFalse(plugin.busy.is_busy("room"))
+        self.assertEqual(len(spawned), 1)
+        self.assertEqual(room.conversation_character_id, "npc-1")
+        self.assertIn("4. 杀害", room.last_response["text"])
+        self.assertIn("6. 可自由使用", room.last_response["text"])
+        plugin._send_text.assert_awaited_once_with(event, room.last_response["text"])
+
+    def test_roundtable_display_fields_are_chinese(self) -> None:
+        plugin = object.__new__(self.module.AIInteractiveFictionPlugin)
+        config = MagicMock()
+        plugin.astrbot_config = config
+        plugin.raw_config = {
+            "roundtable_models": [
+                {"name": "智谱", "role": "proposal", "content_type": "regular"},
+                {"name": "评审", "role": "reviewer", "content_type": "non_safe"},
+            ]
+        }
+        plugin._normalize_roundtable_display_fields()
+        first, second = plugin.raw_config["roundtable_models"]
+        self.assertEqual((first["role_display"], first["content_type_display"]), ("提案", "常规"))
+        self.assertEqual((second["role_display"], second["content_type_display"]), ("评审", "非安全"))
+        config.save_config.assert_called_once_with(replace_config=plugin.raw_config)
 
     async def test_action_lock_rejects_later_action_with_message(self) -> None:
         from _astrbot_plugin_ai_interactive_fiction_integration.services.models import StoryRoom
@@ -192,6 +412,7 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
             public_profile={"name": "岚"},
             full_character={"public": {"name": "岚"}},
             opening_state="醒在房间",
+            opening_choices=["观察", "等待", "前进"],
         )
         room = StoryRoom(
             room_id="room-1",
@@ -227,11 +448,12 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
         async def send_text(_event, content: str) -> None:
             sent.append(("text", content))
 
-        async def send_portrait(_event, _room, character_id: str, _profile) -> None:
+        async def send_portrait(_event, _room, character_id: str, _profile, **_kwargs) -> None:
             sent.append(("image", character_id))
 
         plugin._send_text = send_text
         plugin._generate_initial_portrait = send_portrait
+        plugin.config.image_generation_triggers = set()
         await plugin._create_game(
             event,
             "10001",
@@ -242,9 +464,8 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             sent,
             [
-                ("text", "个人信息"),
                 ("text", "环境：月光照进房间"),
-                ("image", "10001"),
+                ("text", "个人信息\n\n1. 观察\n2. 等待\n3. 前进\n4. 可自由使用“/故事 [行动]”或 @我 行动"),
             ],
         )
         plugin.judge.render_public_profile.assert_awaited_once_with(

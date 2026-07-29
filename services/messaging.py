@@ -50,6 +50,14 @@ async def send_generated_image(event: Any, context: Any, path: Path, generator: 
         return False
 
 
+async def send_cached_image(event: Any, path: Path) -> bool:
+    try:
+        await event.send(MessageChain([Image.fromFileSystem(str(path))]))
+        return True
+    except Exception:
+        return False
+
+
 async def _onebot_forward(event: Any, context: Any, nodes: list[Any]) -> bool:
     get_platform = getattr(context, "get_platform_inst", None)
     if not callable(get_platform):
