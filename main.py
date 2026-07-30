@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import random
 import re
 import time
 from pathlib import Path
@@ -20,7 +21,7 @@ from .services.images import ImageGenerationError, ImageService
 from .services.llm import GlobalJudge, LLMService
 from .services.memory import MemoryService
 from .services.messaging import send_cached_image, send_generated_image, send_roundtable_forward
-from .services.models import RoomMember, StoryRoom
+from .services.models import RoomMember, StoryRoom, initial_character_stats
 from .services.roundtable import (
     RoundtableConfigurationError,
     RoundtableGenerationError,
@@ -54,6 +55,7 @@ SAVE_DISABLED_TEXT = "该故事未开启存档/读档功能"
 REWOUND_TEXT = "角色因世界回溯消失，请重新加入"
 CG_FAILED_TEXT = "CG生成失败，请配置或检查模型"
 GENERATION_FAILED_TEXT = "生成失败，请配置或检查模型"
+STORY_STARTING_TEXT = "故事正在生成中，请稍后"
 
 
 class AIInteractiveFictionPlugin(Star):
@@ -92,6 +94,8 @@ class AIInteractiveFictionPlugin(Star):
             self.roundtable,
             provider_id=self.config.global_story_provider_id,
             persona=self.config.global_story_persona,
+            non_safe_provider_id=self.config.global_non_safe_provider_id,
+            non_safe_persona=self.config.global_non_safe_persona,
             roundtable_triggers=self.config.roundtable_triggers,
             logger=logger,
         )
@@ -449,19 +453,24 @@ class AIInteractiveFictionPlugin(Star):
             await self._send_text(event, "已有玩家的行动正在处理中，请等待故事回复")
             return
         owns_room_lock = True
+        forced_success = self._is_fixed_npc_option(room, requested_action)
         action = self._resolve_command_action(room, requested_action)
         if not action:
             self.busy.finish(room.room_id)
             await self._send_text(event, "请输入1~3号选项，或直接使用 /故事 [行动]")
             return
         story = StoryConfig.from_runtime_dict(room.story_config)
-        judge_task = asyncio.create_task(
-            self.judge.route(
-                action,
-                active_room=True,
-                pending_story_choice=False,
-                action_restriction=story.action_restriction,
-                room_context=self._judge_room_context(room, user_id),
+        judge_task = (
+            None
+            if forced_success
+            else asyncio.create_task(
+                self.judge.route(
+                    action,
+                    active_room=True,
+                    pending_story_choice=False,
+                    action_restriction=story.action_restriction,
+                    room_context=self._judge_room_context(room, user_id),
+                )
             )
         )
         prepared_task = self._start_action_preparation(
@@ -469,16 +478,24 @@ class AIInteractiveFictionPlugin(Star):
             user_id,
             action,
             allow_busy=True,
+            forced_success=forced_success,
         )
-        try:
-            route = await judge_task
-        except Exception as exc:
-            await self._cancel_preparation(prepared_task)
-            self.busy.finish(room.room_id)
-            logger.warning(f"指令行动调用全局判断LLM失败: {exc}")
-            await self._send_text(event, "全局判断LLM调用失败，未执行故事行动。")
-            return
-        if route and not self._route_action_is_reasonable(route):
+        route: dict[str, Any] = {
+            "intent": "action",
+            "content_type": "non_safe",
+            "reasonable": True,
+            "unreasonable_reason": "none",
+        }
+        if judge_task is not None:
+            try:
+                route = await judge_task or {}
+            except Exception as exc:
+                await self._cancel_preparation(prepared_task)
+                self.busy.finish(room.room_id)
+                logger.warning(f"指令行动调用全局判断LLM失败: {exc}")
+                await self._send_text(event, "全局判断LLM调用失败，未执行故事行动。")
+                return
+        if not forced_success and route and not self._route_action_is_reasonable(route):
             await self._cancel_preparation(prepared_task)
             self.busy.finish(room.room_id)
             await self._send_text(event, self.config.unreasonable_action_message)
@@ -495,6 +512,7 @@ class AIInteractiveFictionPlugin(Star):
             trigger_types=self._roundtable_action_triggers(route or {}, content_type),
             prepared=prepared,
             lock_already_held=owns_room_lock,
+            forced_success=forced_success,
         )
 
     def _start_action_preparation(
@@ -504,6 +522,7 @@ class AIInteractiveFictionPlugin(Star):
         requested_action: str,
         *,
         allow_busy: bool = False,
+        forced_success: bool = False,
     ) -> asyncio.Task[PreparedStoryGeneration] | None:
         if room is None or (self.busy.is_busy(room.room_id) and not allow_busy):
             return None
@@ -515,9 +534,10 @@ class AIInteractiveFictionPlugin(Star):
                 room,
                 actor_id=user_id,
                 action=action,
-                content_type="auto",
+                content_type="non_safe" if forced_success else "auto",
                 forbid_player_autonomy=self.config.forbid_player_autonomy,
                 include_psychology=None,
+                forced_success=forced_success,
             )
         )
 
@@ -548,14 +568,26 @@ class AIInteractiveFictionPlugin(Star):
     async def _continue_last_response(self, event: AstrMessageEvent, user_id: str) -> None:
         room = self.store.room_for_user(user_id)
         if room is None:
-            await self._send_text(event, "你当前不在故事房间内")
+            await self._send_text(
+                event,
+                STORY_STARTING_TEXT if user_id in self._starting_users else "你当前不在故事房间内",
+            )
             return
         cached = dict(room.last_response or {})
         text = str(cached.get("text") or "").strip()
         if not text:
             await self._send_text(event, "暂无可重新发送的故事回复")
             return
-        await self._send_text(event, text)
+        segments = [
+            str(item).strip()
+            for item in cached.get("segments", [])
+            if str(item).strip()
+        ] if isinstance(cached.get("segments"), list) else []
+        if segments:
+            for segment in segments:
+                await self._send_text(event, segment)
+        else:
+            await self._send_text(event, text)
         for item in list(cached.get("images") or []):
             if not isinstance(item, dict):
                 continue
@@ -564,8 +596,11 @@ class AIInteractiveFictionPlugin(Star):
                 await send_cached_image(event, path)
 
     async def _start_request(self, event: AstrMessageEvent, user_id: str, args: str) -> None:
-        if self.store.room_for_user(user_id) is not None or user_id in self._starting_users:
+        if self.store.room_for_user(user_id) is not None:
             await self._send_text(event, "你已经在一个故事房间内")
+            return
+        if user_id in self._starting_users:
+            await self._send_text(event, STORY_STARTING_TEXT)
             return
         enabled = self.config.enabled_stories()
         direct_story, requirements, is_random = self._resolve_start_args(args, enabled)
@@ -733,6 +768,7 @@ class AIInteractiveFictionPlugin(Star):
                 joined_turn=target.turn,
                 last_origin=event.unified_msg_origin,
             )
+            target.character_stats[user_id] = initial_character_stats(built.full_character)
             if built.discussion:
                 target.latest_discussion = list(built.discussion)
             if event.unified_msg_origin not in target.origins:
@@ -900,6 +936,7 @@ class AIInteractiveFictionPlugin(Star):
         trigger_types: set[str] | None = None,
         prepared: PreparedStoryGeneration | None = None,
         lock_already_held: bool = False,
+        forced_success: bool = False,
     ) -> None:
         room_id = room.room_id
         if not lock_already_held and not self.busy.try_begin(room_id):
@@ -924,6 +961,7 @@ class AIInteractiveFictionPlugin(Star):
                 include_psychology=include_psychology,
                 trigger_types=trigger_types,
                 prepared=prepared,
+                forced_success=forced_success,
             )
             room.turn += 1
             room.last_active_at = time.time()
@@ -957,6 +995,10 @@ class AIInteractiveFictionPlugin(Star):
                     and character_id not in room.known_characters
                 ):
                     room.known_characters[character_id] = character
+                    room.character_stats.setdefault(
+                        character_id,
+                        initial_character_stats(character),
+                    )
             for changed in result.changed_characters:
                 character_id = str(changed.get("id") or "").strip()
                 if not character_id:
@@ -967,6 +1009,33 @@ class AIInteractiveFictionPlugin(Star):
                         public_profile.update(changed)
                 elif character_id in room.known_characters:
                     room.known_characters[character_id].update(changed)
+            health_changes = await self._apply_health_damage(
+                room,
+                actor_id=user_id,
+                action=action,
+                result=result,
+                forced_killing=forced_success and action.startswith("杀害"),
+            )
+            lust_event = await self._maybe_generate_lust_event(
+                room,
+                actor_id=user_id,
+                previous_conversation_id=pre_action.conversation_character_id,
+                action=action,
+                result=result,
+            )
+            if lust_event is not None:
+                room.history.append(
+                    {
+                        "turn": room.turn,
+                        "actor_id": lust_event["initiator_id"],
+                        "action": "淫乱值随机事件",
+                        "result": lust_event["narrative"],
+                    }
+                )
+                if lust_event["state_summary"]:
+                    room.world_state = lust_event["state_summary"]
+                if lust_event["discussion"]:
+                    room.latest_discussion = lust_event["discussion"]
             story = StoryConfig.from_runtime_dict(room.story_config)
             await self.memory.compress_if_needed(room, story)
 
@@ -980,9 +1049,13 @@ class AIInteractiveFictionPlugin(Star):
             if result.death:
                 response_parts.append("You are dead")
             response = "\n\n".join(response_parts)
+            response_segments = [response]
+            if lust_event is not None:
+                response_segments.append(str(lust_event["narrative"]))
             room.last_response = {
                 "turn": room.turn,
-                "text": response,
+                "text": "\n\n".join(response_segments),
+                "segments": response_segments,
                 "images": [],
             }
             async with self.store.lock:
@@ -992,6 +1065,14 @@ class AIInteractiveFictionPlugin(Star):
 
             text_sent = asyncio.Event()
             image_task: asyncio.Task[Any] | None = None
+            image_result = result
+            if lust_event is not None:
+                image_result = copy.deepcopy(result)
+                image_result.narrative = (
+                    f"{result.narrative}\n{lust_event['narrative']}"
+                )
+                image_result.cg_trigger = "violation"
+                image_result.cg_character_id = str(lust_event["initiator_id"])
             if (
                 not result.story_ended
                 and self.config.image_generation_triggers
@@ -1004,12 +1085,14 @@ class AIInteractiveFictionPlugin(Star):
                         expected_room=room,
                         expected_turn=room.turn,
                         action=action,
-                        result=result,
+                        result=image_result,
+                        health_changes=health_changes,
                         text_sent=text_sent,
                     )
                 )
             try:
-                await self._send_text(event, response)
+                for segment in response_segments:
+                    await self._send_text(event, segment)
             except Exception:
                 if image_task is not None:
                     image_task.cancel()
@@ -1045,6 +1128,8 @@ class AIInteractiveFictionPlugin(Star):
         environment_context: str = "",
         response_turn: int | None = None,
         history_key: str = "",
+        event_context: str = "",
+        non_safe: bool = False,
     ) -> bool:
         expected_turn = room.turn
         try:
@@ -1052,12 +1137,13 @@ class AIInteractiveFictionPlugin(Star):
                 bible=room.bible,
                 character=character,
                 output_dir=self._room_image_dir(room.room_id),
-                event_context=(
+                event_context=event_context or (
                     f"首次登场。当前可见环境：{environment_context}"
                     if environment_context.strip()
                     else "首次登场"
                 ),
                 environment_context=environment_context,
+                non_safe=non_safe,
             )
         except Exception as exc:
             logger.warning(f"首次登场立绘生成失败: {exc}")
@@ -1101,6 +1187,7 @@ class AIInteractiveFictionPlugin(Star):
         expected_turn: int,
         action: str,
         result: ActionResult,
+        health_changes: list[dict[str, Any]],
         text_sent: asyncio.Event,
     ) -> None:
         try:
@@ -1120,8 +1207,48 @@ class AIInteractiveFictionPlugin(Star):
                 known_characters=known_characters,
                 new_characters=result.new_characters,
                 changed_characters=result.changed_characters,
-                enabled_triggers=self.config.image_generation_triggers,
+                enabled_triggers=self.config.image_generation_triggers - {"battle_damage"},
             )
+            for change in health_changes:
+                trigger_type = "killing" if change["new_health"] == 0 else "battle_damage"
+                if trigger_type not in self.config.image_generation_triggers:
+                    continue
+                if trigger_type == "battle_damage" and not change["crossed_milestone"]:
+                    continue
+                new_health = int(change["new_health"])
+                if new_health == 0:
+                    description = (
+                        f"{change['character_id']}生命值归零，已经死亡并成为尸体。"
+                        "画面必须明确表现死亡结果。"
+                    )
+                elif new_health <= 40:
+                    description = (
+                        f"{change['character_id']}当前生命值为{new_health}，全裸且伤痕累累，"
+                        "表现严重战损、痛苦表情和虚弱姿势。"
+                    )
+                else:
+                    description = (
+                        f"{change['character_id']}当前生命值为{new_health}，"
+                        "根据伤势程度表现衣物破损、伤痕、表情与姿势变化。"
+                    )
+                triggers.append(
+                    {
+                        "type": trigger_type,
+                        "character_id": str(change["character_id"]),
+                        "description": description,
+                    }
+                )
+            if (
+                result.cg_trigger in {"killing", "violation"}
+                and result.cg_trigger in self.config.image_generation_triggers
+            ):
+                triggers.append(
+                    {
+                        "type": result.cg_trigger,
+                        "character_id": result.cg_character_id,
+                        "description": result.narrative,
+                    }
+                )
             await text_sent.wait()
             order = {
                 "first_appearance": 0,
@@ -1131,6 +1258,7 @@ class AIInteractiveFictionPlugin(Star):
                 "killing": 4,
                 "violation": 5,
             }
+            triggers = self._coalesce_image_triggers(triggers, result)
             for trigger in sorted(triggers, key=lambda item: order.get(item["type"], 99)):
                 await self._handle_image_trigger(
                     event,
@@ -1145,6 +1273,69 @@ class AIInteractiveFictionPlugin(Star):
         except Exception as exc:
             logger.warning(f"故事文字已发送，但后台图像时机处理失败: {exc}")
 
+    @classmethod
+    def _coalesce_image_triggers(
+        cls,
+        triggers: list[dict[str, str]],
+        result: ActionResult,
+    ) -> list[dict[str, str]]:
+        priority = {
+            "first_appearance": 1,
+            "first_conversation": 2,
+            "battle_damage": 3,
+            "killing": 4,
+            "violation": 4,
+            "scene_change": 1,
+        }
+        selected: dict[str, dict[str, str]] = {}
+        for trigger in triggers:
+            trigger_type = str(trigger.get("type") or "")
+            character_id = cls._image_trigger_character_id(trigger, result)
+            key = (
+                "event:scene_change"
+                if trigger_type == "scene_change"
+                else f"character:{character_id or 'unknown'}"
+            )
+            normalized = dict(trigger)
+            if character_id:
+                normalized["character_id"] = character_id
+            previous = selected.get(key)
+            if previous is None or priority.get(trigger_type, 0) > priority.get(
+                str(previous.get("type") or ""),
+                0,
+            ):
+                selected[key] = normalized
+        return list(selected.values())
+
+    @staticmethod
+    def _image_trigger_character_id(
+        trigger: dict[str, str],
+        result: ActionResult,
+    ) -> str:
+        character_id = str(trigger.get("character_id") or "").strip()
+        trigger_type = str(trigger.get("type") or "")
+        if not character_id and trigger_type == "first_conversation":
+            character_id = result.conversation_character_id
+        elif not character_id and trigger_type in {"killing", "violation"}:
+            character_id = result.cg_character_id
+        if not character_id and trigger_type == "first_appearance" and len(result.new_characters) == 1:
+            character_id = str(
+                result.new_characters[0].get("id")
+                or result.new_characters[0].get("name")
+                or ""
+            ).strip()
+        return character_id
+
+    @staticmethod
+    def _image_trigger_history_key(
+        trigger_type: str,
+        character_id: str,
+        turn: int,
+    ) -> str:
+        if trigger_type in {"first_appearance", "first_conversation"} and character_id:
+            return f"{trigger_type}:{character_id}"
+        return f"{trigger_type}:{character_id or 'scene'}:turn-{turn}"
+
     async def _handle_image_trigger(
         self,
         event: AstrMessageEvent,
@@ -1156,16 +1347,11 @@ class AIInteractiveFictionPlugin(Star):
         result: ActionResult,
     ) -> None:
         trigger_type = trigger["type"]
-        character_id = trigger.get("character_id") or ""
-        if not character_id:
-            if trigger_type == "first_conversation":
-                character_id = result.conversation_character_id
-            elif trigger_type in {"killing", "violation"}:
-                character_id = result.cg_character_id
-        history_key = (
-            f"{trigger_type}:{character_id}"
-            if character_id
-            else f"{trigger_type}:turn-{expected_turn}"
+        character_id = self._image_trigger_character_id(trigger, result)
+        history_key = self._image_trigger_history_key(
+            trigger_type,
+            character_id,
+            expected_turn,
         )
         inflight_key = f"{room_id}:{history_key}"
         room = self.store.rooms.get(room_id)
@@ -1195,20 +1381,28 @@ class AIInteractiveFictionPlugin(Star):
                 if not character:
                     return
                 cached = room.portraits.get(character_id)
-                if trigger_type in {"first_appearance", "first_conversation"} and not cached:
+                if trigger_type == "first_appearance" and cached:
+                    succeeded = True
+                elif not cached and trigger_type in {
+                    "first_appearance",
+                    "first_conversation",
+                    "killing",
+                    "violation",
+                }:
                     succeeded = await self._generate_initial_portrait(
                         event,
                         room,
                         character_id,
                         character,
                         response_turn=expected_turn,
+                        event_context=trigger.get("description") or result.narrative,
+                        non_safe=trigger_type in {"killing", "violation"},
                     )
                 else:
                     if not cached or not Path(str(cached.get("path") or "")).is_file():
                         if trigger_type in {"killing", "violation", "battle_damage"}:
                             await self._send_text(event, CG_FAILED_TEXT)
                         return
-                    update_portrait = trigger_type in {"first_conversation", "battle_damage"}
                     succeeded = await self._generate_character_edit(
                         event,
                         room_id=room_id,
@@ -1219,7 +1413,6 @@ class AIInteractiveFictionPlugin(Star):
                         cached=cached,
                         event_context=trigger.get("description") or result.narrative,
                         non_safe=trigger_type in {"killing", "violation", "battle_damage"},
-                        update_portrait=update_portrait,
                     )
             if succeeded:
                 await self._mark_image_trigger(room_id, history_key)
@@ -1244,7 +1437,6 @@ class AIInteractiveFictionPlugin(Star):
         cached: dict[str, str],
         event_context: str,
         non_safe: bool,
-        update_portrait: bool,
     ) -> bool:
         source_path = str(cached.get("path") or "")
         room = self.store.rooms.get(room_id)
@@ -1267,17 +1459,6 @@ class AIInteractiveFictionPlugin(Star):
         ):
             self._discard_generated_path(generated.path)
             return False
-        if update_portrait:
-            async with self.store.lock:
-                current = self.store.rooms.get(room_id)
-                if current is None:
-                    self._discard_generated_path(generated.path)
-                    return False
-                current.portraits[character_id] = {
-                    "path": str(generated.path),
-                    "prompt": generated.prompt,
-                }
-                await self.store.save()
         sent = await send_generated_image(event, self.context, generated.path, generated.generator)
         if sent:
             await self._cache_generated_image(room_id, expected_turn, generated)
@@ -1308,6 +1489,165 @@ class AIInteractiveFictionPlugin(Star):
             if room is not None and history_key not in room.image_trigger_history:
                 room.image_trigger_history.append(history_key)
                 await self.store.save()
+
+    async def _apply_health_damage(
+        self,
+        room: StoryRoom,
+        *,
+        actor_id: str,
+        action: str,
+        result: ActionResult,
+        forced_killing: bool,
+    ) -> list[dict[str, Any]]:
+        characters = {
+            **room.known_characters,
+            **{
+                member_id: member.character.get("public", {})
+                for member_id, member in room.members.items()
+            },
+        }
+        damage_items: list[dict[str, Any]] = []
+        try:
+            damage_items = await self.judge.assess_health_damage(
+                action=action,
+                narrative=result.narrative,
+                characters=characters,
+                character_stats=room.character_stats,
+            )
+        except Exception as exc:
+            logger.warning(f"全局判断LLM生命值裁定失败，本轮不自动扣血: {exc}")
+
+        fixed_target = result.cg_character_id
+        if forced_killing and fixed_target not in room.character_stats:
+            match = re.search(r"ID[：:]\s*([^）)]+)", action)
+            fixed_target = str(match.group(1) if match else "").strip()
+        if forced_killing and fixed_target in room.character_stats:
+            damage_items = [
+                item
+                for item in damage_items
+                if str(item.get("character_id") or "") != fixed_target
+            ]
+            damage_items.append(
+                {
+                    "character_id": fixed_target,
+                    "amount": room.character_stats[fixed_target]["health"],
+                    "reason": "固定杀害选项100%成功",
+                }
+            )
+
+        merged: dict[str, dict[str, Any]] = {}
+        for item in damage_items:
+            character_id = str(item.get("character_id") or "").strip()
+            if character_id not in room.character_stats:
+                continue
+            current = merged.setdefault(
+                character_id,
+                {"amount": 0, "reasons": []},
+            )
+            current["amount"] += max(0, int(item.get("amount") or 0))
+            reason = str(item.get("reason") or "").strip()
+            if reason:
+                current["reasons"].append(reason)
+
+        changes: list[dict[str, Any]] = []
+        milestones = (80, 60, 40, 20, 0)
+        for character_id, item in merged.items():
+            stats = room.character_stats[character_id]
+            old_health = min(100, max(0, int(stats.get("health", 100))))
+            new_health = max(0, old_health - min(100, int(item["amount"])))
+            if new_health == old_health:
+                continue
+            stats["health"] = new_health
+            crossed = any(new_health <= milestone < old_health for milestone in milestones)
+            changes.append(
+                {
+                    "character_id": character_id,
+                    "old_health": old_health,
+                    "new_health": new_health,
+                    "damage": old_health - new_health,
+                    "crossed_milestone": crossed,
+                    "reason": "；".join(item["reasons"]),
+                }
+            )
+            if new_health == 0:
+                if character_id in room.members and character_id not in room.dead_users:
+                    room.dead_users.append(character_id)
+                character = room.known_characters.get(character_id)
+                if isinstance(character, dict):
+                    character["deceased"] = True
+                    character["state"] = "尸体"
+                if character_id == actor_id:
+                    result.death = True
+        return changes
+
+    async def _maybe_generate_lust_event(
+        self,
+        room: StoryRoom,
+        *,
+        actor_id: str,
+        previous_conversation_id: str,
+        action: str,
+        result: ActionResult,
+    ) -> dict[str, Any] | None:
+        encountered_ids: list[str] = []
+        for character in result.new_characters:
+            character_id = str(character.get("id") or character.get("name") or "").strip()
+            if character_id and character_id not in encountered_ids:
+                encountered_ids.append(character_id)
+        if (
+            result.conversation_character_id
+            and result.conversation_character_id != previous_conversation_id
+            and result.conversation_character_id not in encountered_ids
+        ):
+            encountered_ids.append(result.conversation_character_id)
+        encountered_ids = [
+            character_id
+            for character_id in encountered_ids
+            if character_id in room.character_stats
+            and int(room.character_stats[character_id].get("health", 100)) > 0
+        ]
+        if not encountered_ids:
+            return None
+
+        candidate_pairs: list[tuple[str, str]] = []
+        for encountered_id in encountered_ids:
+            candidate_pairs.append((actor_id, encountered_id))
+            candidate_pairs.append((encountered_id, actor_id))
+        for initiator_id, target_id in candidate_pairs:
+            if any(
+                int(room.character_stats.get(character_id, {}).get("health", 100)) <= 0
+                for character_id in (initiator_id, target_id)
+            ):
+                continue
+            initiator = self._room_character(room, initiator_id)
+            target = self._room_character(room, target_id)
+            lust = min(
+                100,
+                max(0, int(room.character_stats.get(initiator_id, {}).get("lust", 0))),
+            )
+            if lust <= 0 or random.randint(1, 100) > lust:
+                continue
+            try:
+                generated = await self.game.generate_lust_event(
+                    room,
+                    preceding_action=action,
+                    preceding_result=result.narrative,
+                    initiator_id=initiator_id,
+                    initiator=initiator,
+                    target_id=target_id,
+                    target=target,
+                )
+            except Exception as exc:
+                logger.warning(f"淫乱值随机事件生成失败，本轮跳过: {exc}")
+                return None
+            return {
+                "initiator_id": initiator_id,
+                "target_id": target_id,
+                "narrative": generated.narrative,
+                "state_summary": generated.state_summary,
+                "discussion": generated.discussion,
+            }
+        return None
 
     @staticmethod
     def _room_character(room: StoryRoom, character_id: str) -> dict[str, Any]:
@@ -1415,6 +1755,12 @@ class AIInteractiveFictionPlugin(Star):
             return f"{cleaned}正在交谈的角色（ID：{room.conversation_character_id}）"
         return cleaned
 
+    @staticmethod
+    def _is_fixed_npc_option(room: StoryRoom, requested: str) -> bool:
+        if not room.conversation_character_id:
+            return False
+        return str(requested or "").strip() in {"4", "5", "杀害", "侵犯"}
+
     @classmethod
     def _direct_natural_choice(
         cls,
@@ -1439,6 +1785,8 @@ class AIInteractiveFictionPlugin(Star):
         digits = {"一": "1", "二": "2", "三": "3", "四": "4", "五": "5"}
         pattern = re.compile(r"^(?:(?:选|选择)\s*|第\s*)?([1-5一二三四五])\s*(?:项)?$")
         for candidate in candidates:
+            if candidate in {"杀害", "侵犯"} and room.conversation_character_id:
+                return candidate
             match = pattern.fullmatch(candidate)
             if not match:
                 continue

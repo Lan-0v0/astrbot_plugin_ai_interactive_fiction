@@ -33,6 +33,8 @@ class StoryGeneratorService:
         *,
         provider_id: str,
         persona: str,
+        non_safe_provider_id: str = "",
+        non_safe_persona: str = "",
         roundtable_triggers: set[str],
         logger: Any,
     ) -> None:
@@ -40,6 +42,8 @@ class StoryGeneratorService:
         self.roundtable = roundtable
         self.provider_id = provider_id
         self.persona = persona
+        self.non_safe_provider_id = non_safe_provider_id
+        self.non_safe_persona = non_safe_persona
         self.roundtable_triggers = set(roundtable_triggers)
         self.logger = logger
 
@@ -47,7 +51,8 @@ class StoryGeneratorService:
         try:
             draft = await self._generate_direct(request)
         except Exception as exc:
-            self.logger.warning(f"全局故事生成LLM生成失败，回退圆桌会议: {exc}")
+            model_name = "全局非安全内容LLM" if request.content_type == "non_safe" else "全局故事生成LLM"
+            self.logger.warning(f"{model_name}生成失败，回退圆桌会议: {exc}")
             draft = None
         return PreparedStoryGeneration(request=request, draft=draft)
 
@@ -85,12 +90,16 @@ class StoryGeneratorService:
         )
 
     async def _generate_direct(self, request: StoryGenerationRequest) -> str:
-        if not self.provider_id:
-            raise RoundtableGenerationError("未配置全局故事生成LLM")
+        is_non_safe = request.content_type == "non_safe"
+        provider_id = self.non_safe_provider_id if is_non_safe else self.provider_id
+        persona = self.non_safe_persona if is_non_safe else self.persona
+        model_name = "全局非安全内容LLM" if is_non_safe else "全局故事生成LLM"
+        if not provider_id:
+            raise RoundtableGenerationError(f"未配置{model_name}")
         output = await self.llm.generate(
-            self.provider_id,
+            provider_id,
             request.task,
-            system_prompt=self.persona,
+            system_prompt=persona,
             temperature=request.temperature,
         )
         output = str(output or "").strip()
@@ -100,9 +109,9 @@ class StoryGeneratorService:
             return output
 
         repaired = await self.llm.generate(
-            self.provider_id,
+            provider_id,
             self._repair_prompt(request, output),
-            system_prompt=self.persona,
+            system_prompt=persona,
             temperature=0.0,
         )
         repaired = str(repaired or "").strip()

@@ -4,6 +4,28 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
+def _clamp_stat(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return min(100, max(0, parsed))
+
+
+def initial_character_stats(character: dict[str, Any]) -> dict[str, int]:
+    configured = character.get("stats") if isinstance(character.get("stats"), dict) else {}
+    public = character.get("public") if isinstance(character.get("public"), dict) else character
+    return {
+        "health": 100,
+        "lust": _clamp_stat(
+            configured.get("lust")
+            if isinstance(configured, dict) and "lust" in configured
+            else (public.get("lust") if isinstance(public, dict) else None),
+            0,
+        ),
+    }
+
+
 @dataclass(slots=True)
 class RoomMember:
     user_id: str
@@ -45,6 +67,7 @@ class StoryRoom:
     image_trigger_history: list[str] = field(default_factory=list)
     last_response: dict[str, Any] = field(default_factory=dict)
     origins: list[str] = field(default_factory=list)
+    character_stats: dict[str, dict[str, int]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -53,7 +76,7 @@ class StoryRoom:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "StoryRoom":
-        return cls(
+        room = cls(
             room_id=str(raw.get("room_id") or ""),
             owner_id=str(raw.get("owner_id") or ""),
             story_config=dict(raw.get("story_config") or {}),
@@ -80,7 +103,20 @@ class StoryRoom:
             ],
             last_response=dict(raw.get("last_response") or {}),
             origins=[str(item) for item in raw.get("origins", []) if str(item).strip()],
+            character_stats={
+                str(character_id): {
+                    "health": _clamp_stat(dict(stats).get("health"), 100),
+                    "lust": _clamp_stat(dict(stats).get("lust"), 0),
+                }
+                for character_id, stats in dict(raw.get("character_stats") or {}).items()
+                if isinstance(stats, dict)
+            },
         )
+        for character_id, member in room.members.items():
+            room.character_stats.setdefault(character_id, initial_character_stats(member.character))
+        for character_id, character in room.known_characters.items():
+            room.character_stats.setdefault(character_id, initial_character_stats(character))
+        return room
 
 
 @dataclass(slots=True)

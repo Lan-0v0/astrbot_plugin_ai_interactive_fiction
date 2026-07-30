@@ -422,6 +422,24 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
             await plugin._continue_last_response(event, "owner")
         send.assert_awaited_once_with(event, "结果\n\n1. 前进")
 
+    async def test_start_and_view_report_consistent_status_while_story_is_generating(self) -> None:
+        plugin = object.__new__(self.module.AIInteractiveFictionPlugin)
+        plugin.store = SimpleNamespace(room_for_user=lambda _user_id: None)
+        plugin._starting_users = {"10001"}
+        plugin._send_text = AsyncMock()
+        event = object()
+
+        await plugin._start_request(event, "10001", "校园、魔法")
+        await plugin._continue_last_response(event, "10001")
+
+        self.assertEqual(
+            plugin._send_text.await_args_list,
+            [
+                unittest.mock.call(event, self.module.STORY_STARTING_TEXT),
+                unittest.mock.call(event, self.module.STORY_STARTING_TEXT),
+            ],
+        )
+
     async def test_continue_replays_completed_images(self) -> None:
         from _astrbot_plugin_ai_interactive_fiction_integration.services.models import StoryRoom
 
@@ -493,6 +511,7 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
         plugin.store = Store()
         plugin.busy = RoomBusyRegistry()
         plugin.game = SimpleNamespace(act=AsyncMock(return_value=result))
+        plugin.judge = SimpleNamespace(assess_health_damage=AsyncMock(return_value=[]))
         plugin.memory = SimpleNamespace(compress_if_needed=AsyncMock(return_value=False))
         plugin.saves = SimpleNamespace(auto_save=MagicMock())
         plugin.config = SimpleNamespace(
@@ -523,6 +542,93 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("4. 杀害", room.last_response["text"])
         self.assertIn("6. 可自由使用", room.last_response["text"])
         plugin._send_text.assert_awaited_once_with(event, room.last_response["text"])
+
+    async def test_lust_event_is_sent_and_cached_as_a_separate_segment(self) -> None:
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.config import StoryConfig
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.game import ActionResult
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.models import RoomMember, StoryRoom
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.storage import RoomBusyRegistry
+
+        room = StoryRoom(
+            room_id="room",
+            owner_id="owner",
+            story_config=StoryConfig("story", "测试", enabled=True).to_runtime_dict(),
+            bible={},
+            members={
+                "owner": RoomMember(
+                    "owner",
+                    "玩家",
+                    {"public": {"name": "玩家"}},
+                    0,
+                    "origin",
+                )
+            },
+            created_at=1,
+            last_active_at=1,
+            character_stats={"owner": {"health": 100, "lust": 0}},
+        )
+
+        class Store:
+            def __init__(self):
+                self.rooms = {"room": room}
+                self.lock = asyncio.Lock()
+                self.save = AsyncMock()
+
+        result = ActionResult(
+            narrative="你向前观察。",
+            psychology="",
+            choices=["进入", "等待", "返回"],
+            conversation_character_id="",
+            state_summary="观察完成",
+            death=False,
+            story_ended=False,
+            major_node=False,
+            new_characters=[],
+            changed_characters=[],
+            cg_trigger="none",
+            cg_character_id="",
+            discussion=[],
+        )
+        plugin = object.__new__(self.module.AIInteractiveFictionPlugin)
+        plugin.store = Store()
+        plugin.busy = RoomBusyRegistry()
+        plugin.game = SimpleNamespace(act=AsyncMock(return_value=result))
+        plugin.memory = SimpleNamespace(compress_if_needed=AsyncMock(return_value=False))
+        plugin.saves = SimpleNamespace(auto_save=MagicMock())
+        plugin.config = SimpleNamespace(
+            forbid_player_autonomy=True,
+            image_generation_triggers=set(),
+        )
+        plugin.images = SimpleNamespace(has_enabled_generators=lambda: False)
+        plugin._apply_health_damage = AsyncMock(return_value=[])
+        plugin._maybe_generate_lust_event = AsyncMock(
+            return_value={
+                "initiator_id": "npc-1",
+                "target_id": "owner",
+                "narrative": "随机事件正文",
+                "state_summary": "随机事件结束",
+                "discussion": [],
+            }
+        )
+        plugin._send_text = AsyncMock()
+        event = SimpleNamespace(unified_msg_origin="origin")
+
+        await plugin._perform_action(
+            event,
+            "owner",
+            room,
+            "观察",
+            "regular",
+            include_psychology=False,
+        )
+
+        self.assertEqual(len(room.last_response["segments"]), 2)
+        self.assertEqual(room.last_response["segments"][1], "随机事件正文")
+        self.assertEqual(
+            [call.args[1] for call in plugin._send_text.await_args_list],
+            room.last_response["segments"],
+        )
+        self.assertEqual(room.history[-1]["action"], "淫乱值随机事件")
 
     async def test_command_action_checks_room_lock_before_judge(self) -> None:
         from _astrbot_plugin_ai_interactive_fiction_integration.services.models import StoryRoom
@@ -663,6 +769,352 @@ class AstrBotRegistrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plugin._perform_action.await_args.args[4], "non_safe")
         self.assertIs(plugin._perform_action.await_args.kwargs["prepared"], prepared)
         plugin.busy.finish(room.room_id)
+
+    async def test_fixed_npc_option_bypasses_judge_and_forces_non_safe_success(self) -> None:
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.config import StoryConfig
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.models import StoryRoom
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.storage import RoomBusyRegistry
+
+        room = StoryRoom(
+            room_id="room-1",
+            owner_id="10001",
+            story_config=StoryConfig("story", "测试", enabled=True).to_runtime_dict(),
+            bible={},
+            members={},
+            created_at=1,
+            last_active_at=1,
+            conversation_character_id="npc-1",
+        )
+        prepared = object()
+        plugin = object.__new__(self.module.AIInteractiveFictionPlugin)
+        plugin.store = SimpleNamespace(room_for_user=lambda _user_id: room, rewound_users={})
+        plugin.busy = RoomBusyRegistry()
+        plugin.config = SimpleNamespace(forbid_player_autonomy=True)
+        plugin.judge = SimpleNamespace(route=AsyncMock(return_value={"reasonable": False}))
+        plugin.game = SimpleNamespace(prepare_action=AsyncMock(return_value=prepared))
+        plugin._perform_action = AsyncMock()
+        plugin._send_text = AsyncMock()
+
+        await plugin._perform_command_action(object(), "10001", "4")
+
+        plugin.judge.route.assert_not_awaited()
+        plugin._send_text.assert_not_awaited()
+        prepare_kwargs = plugin.game.prepare_action.await_args.kwargs
+        self.assertTrue(prepare_kwargs["forced_success"])
+        plugin._perform_action.assert_awaited_once()
+        args = plugin._perform_action.await_args.args
+        kwargs = plugin._perform_action.await_args.kwargs
+        self.assertEqual(args[3], "杀害正在交谈的角色（ID：npc-1）")
+        self.assertEqual(args[4], "non_safe")
+        self.assertEqual(kwargs["trigger_types"], {"normal_action", "non_safe"})
+        self.assertTrue(kwargs["forced_success"])
+        self.assertIs(kwargs["prepared"], prepared)
+        plugin.busy.finish(room.room_id)
+
+    async def test_health_damage_milestones_and_fixed_killing_update_cached_stats(self) -> None:
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.models import StoryRoom
+
+        room = StoryRoom(
+            room_id="room-1",
+            owner_id="owner",
+            story_config={},
+            bible={},
+            members={},
+            created_at=1,
+            last_active_at=1,
+            known_characters={"npc-1": {"id": "npc-1", "name": "角色"}},
+            character_stats={"npc-1": {"health": 100, "lust": 0}},
+        )
+        result = SimpleNamespace(
+            narrative="角色受到重击",
+            cg_character_id="npc-1",
+            death=False,
+        )
+        plugin = object.__new__(self.module.AIInteractiveFictionPlugin)
+        plugin.judge = SimpleNamespace(
+            assess_health_damage=AsyncMock(
+                return_value=[{"character_id": "npc-1", "amount": 40, "reason": "重击"}]
+            )
+        )
+
+        changes = await plugin._apply_health_damage(
+            room,
+            actor_id="owner",
+            action="攻击",
+            result=result,
+            forced_killing=False,
+        )
+
+        self.assertEqual(room.character_stats["npc-1"]["health"], 60)
+        self.assertEqual(len(changes), 1)
+        self.assertTrue(changes[0]["crossed_milestone"])
+
+        plugin.judge.assess_health_damage.return_value = []
+        killing = await plugin._apply_health_damage(
+            room,
+            actor_id="owner",
+            action="杀害正在交谈的角色（ID：npc-1）",
+            result=result,
+            forced_killing=True,
+        )
+        self.assertEqual(room.character_stats["npc-1"]["health"], 0)
+        self.assertEqual(len(killing), 1)
+        self.assertTrue(room.known_characters["npc-1"]["deceased"])
+        self.assertEqual(room.known_characters["npc-1"]["state"], "尸体")
+
+    async def test_health_drop_generates_one_cg_and_uses_severe_description_at_40(self) -> None:
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.models import StoryRoom
+
+        room = StoryRoom(
+            room_id="room-1",
+            owner_id="owner",
+            story_config={},
+            bible={},
+            members={},
+            created_at=1,
+            last_active_at=1,
+            known_characters={"npc-1": {"id": "npc-1", "name": "角色"}},
+        )
+        result = SimpleNamespace(
+            narrative="角色受伤",
+            conversation_character_id="npc-1",
+            cg_trigger="none",
+            cg_character_id="",
+            new_characters=[],
+            changed_characters=[],
+        )
+        plugin = object.__new__(self.module.AIInteractiveFictionPlugin)
+        plugin.store = SimpleNamespace(rooms={"room-1": room})
+        plugin.config = SimpleNamespace(image_generation_triggers={"battle_damage"})
+        plugin.judge = SimpleNamespace(detect_image_triggers=AsyncMock(return_value=[]))
+        plugin._handle_image_trigger = AsyncMock()
+        text_sent = asyncio.Event()
+        text_sent.set()
+
+        await plugin._detect_and_handle_action_images(
+            object(),
+            room_id="room-1",
+            expected_room=room,
+            expected_turn=2,
+            action="连续重击",
+            result=result,
+            health_changes=[
+                {
+                    "character_id": "npc-1",
+                    "old_health": 80,
+                    "new_health": 40,
+                    "damage": 40,
+                    "crossed_milestone": True,
+                    "reason": "重伤",
+                }
+            ],
+            text_sent=text_sent,
+        )
+
+        plugin._handle_image_trigger.assert_awaited_once()
+        trigger = plugin._handle_image_trigger.await_args.kwargs["trigger"]
+        self.assertEqual(trigger["type"], "battle_damage")
+        self.assertIn("全裸且伤痕累累", trigger["description"])
+
+    async def test_lust_probability_zero_or_hundred_and_only_one_event_per_turn(self) -> None:
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.models import RoomMember, StoryRoom
+
+        room = StoryRoom(
+            room_id="room-1",
+            owner_id="owner",
+            story_config={},
+            bible={},
+            members={
+                "owner": RoomMember(
+                    "owner",
+                    "玩家",
+                    {"public": {"name": "玩家"}},
+                    0,
+                    "origin",
+                )
+            },
+            created_at=1,
+            last_active_at=1,
+            known_characters={
+                "npc-1": {"id": "npc-1", "name": "甲"},
+                "npc-2": {"id": "npc-2", "name": "乙"},
+            },
+            character_stats={
+                "owner": {"health": 100, "lust": 0},
+                "npc-1": {"health": 100, "lust": 100},
+                "npc-2": {"health": 100, "lust": 100},
+            },
+        )
+        result = SimpleNamespace(
+            narrative="你遇见两名角色",
+            new_characters=[{"id": "npc-1"}, {"id": "npc-2"}],
+            conversation_character_id="npc-1",
+        )
+        generated = SimpleNamespace(
+            narrative="随机事件",
+            state_summary="事件结束",
+            discussion=[],
+        )
+        plugin = object.__new__(self.module.AIInteractiveFictionPlugin)
+        plugin.game = SimpleNamespace(generate_lust_event=AsyncMock(return_value=generated))
+
+        event = await plugin._maybe_generate_lust_event(
+            room,
+            actor_id="owner",
+            previous_conversation_id="",
+            action="观察",
+            result=result,
+        )
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event["initiator_id"], "npc-1")
+        self.assertEqual(event["target_id"], "owner")
+        plugin.game.generate_lust_event.assert_awaited_once()
+
+        room.character_stats["npc-1"]["lust"] = 0
+        room.character_stats["npc-2"]["lust"] = 0
+        plugin.game.generate_lust_event.reset_mock()
+        self.assertIsNone(
+            await plugin._maybe_generate_lust_event(
+                room,
+                actor_id="owner",
+                previous_conversation_id="",
+                action="观察",
+                result=result,
+            )
+        )
+        plugin.game.generate_lust_event.assert_not_awaited()
+
+    async def test_character_edits_keep_the_first_cg_as_immutable_base(self) -> None:
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.models import StoryRoom
+
+        with tempfile.TemporaryDirectory() as directory:
+            base_path = Path(directory) / "first.png"
+            edited_path = Path(directory) / "edited.png"
+            base_path.write_bytes(b"base")
+            edited_path.write_bytes(b"edited")
+            room = StoryRoom(
+                room_id="room-1",
+                owner_id="10001",
+                story_config={},
+                bible={},
+                members={},
+                created_at=1,
+                last_active_at=1,
+                portraits={"npc-1": {"path": str(base_path), "prompt": "first prompt"}},
+            )
+            generated = SimpleNamespace(
+                path=edited_path,
+                prompt="edited prompt",
+                generator=SimpleNamespace(name="generator", kind="openai"),
+            )
+            plugin = object.__new__(self.module.AIInteractiveFictionPlugin)
+            plugin.store = SimpleNamespace(rooms={"room-1": room}, images_dir=Path(directory))
+            plugin.images = SimpleNamespace(
+                generate_character_image=AsyncMock(return_value=generated)
+            )
+            plugin.context = object()
+            plugin._cache_generated_image = AsyncMock()
+
+            with patch.object(self.module, "send_generated_image", AsyncMock(return_value=True)):
+                succeeded = await plugin._generate_character_edit(
+                    object(),
+                    room_id="room-1",
+                    expected_room=room,
+                    expected_turn=1,
+                    character_id="npc-1",
+                    character={"name": "角色"},
+                    cached=room.portraits["npc-1"],
+                    event_context="本轮CG",
+                    non_safe=True,
+                )
+
+            self.assertTrue(succeeded)
+            self.assertEqual(room.portraits["npc-1"]["path"], str(base_path))
+            image_kwargs = plugin.images.generate_character_image.await_args.kwargs
+            self.assertEqual(image_kwargs["input_image"], base_path)
+            self.assertEqual(image_kwargs["original_prompt"], "first prompt")
+
+    def test_image_triggers_coalesce_to_one_highest_priority_event_per_character(self) -> None:
+        result = SimpleNamespace(
+            conversation_character_id="npc-1",
+            cg_character_id="npc-1",
+            new_characters=[{"id": "npc-1"}],
+        )
+        triggers = [
+            {"type": "first_appearance", "character_id": "npc-1", "description": "登场"},
+            {"type": "battle_damage", "character_id": "npc-1", "description": "受伤"},
+            {"type": "killing", "character_id": "npc-1", "description": "杀害"},
+        ]
+
+        selected = self.module.AIInteractiveFictionPlugin._coalesce_image_triggers(
+            triggers,
+            result,
+        )
+
+        self.assertEqual(selected, [triggers[-1]])
+
+    def test_repeatable_cg_triggers_are_deduplicated_per_turn_only(self) -> None:
+        key = self.module.AIInteractiveFictionPlugin._image_trigger_history_key
+        self.assertEqual(key("first_appearance", "npc-1", 2), "first_appearance:npc-1")
+        self.assertEqual(key("first_appearance", "npc-1", 3), "first_appearance:npc-1")
+        self.assertEqual(key("killing", "npc-1", 2), "killing:npc-1:turn-2")
+        self.assertEqual(key("killing", "npc-1", 3), "killing:npc-1:turn-3")
+        self.assertEqual(key("violation", "npc-1", 3), "violation:npc-1:turn-3")
+
+    async def test_structured_cg_trigger_merges_with_judgment_without_duplicate_image(self) -> None:
+        from _astrbot_plugin_ai_interactive_fiction_integration.services.models import StoryRoom
+
+        room = StoryRoom(
+            room_id="room-1",
+            owner_id="10001",
+            story_config={},
+            bible={},
+            members={},
+            created_at=1,
+            last_active_at=1,
+            known_characters={"npc-1": {"id": "npc-1", "name": "角色"}},
+        )
+        result = SimpleNamespace(
+            narrative="结果",
+            conversation_character_id="npc-1",
+            cg_trigger="killing",
+            cg_character_id="npc-1",
+            new_characters=[{"id": "npc-1"}],
+            changed_characters=[{"id": "npc-1"}],
+        )
+        plugin = object.__new__(self.module.AIInteractiveFictionPlugin)
+        plugin.store = SimpleNamespace(rooms={"room-1": room})
+        plugin.config = SimpleNamespace(
+            image_generation_triggers={"first_appearance", "battle_damage", "killing"}
+        )
+        plugin.judge = SimpleNamespace(
+            detect_image_triggers=AsyncMock(
+                return_value=[
+                    {"type": "first_appearance", "character_id": "npc-1", "description": "登场"},
+                    {"type": "battle_damage", "character_id": "npc-1", "description": "战损"},
+                ]
+            )
+        )
+        plugin._handle_image_trigger = AsyncMock()
+        text_sent = asyncio.Event()
+        text_sent.set()
+
+        await plugin._detect_and_handle_action_images(
+            object(),
+            room_id="room-1",
+            expected_room=room,
+            expected_turn=1,
+            action="杀害",
+            result=result,
+            health_changes=[],
+            text_sent=text_sent,
+        )
+
+        plugin._handle_image_trigger.assert_awaited_once()
+        selected = plugin._handle_image_trigger.await_args.kwargs["trigger"]
+        self.assertEqual(selected["type"], "killing")
+        self.assertEqual(selected["character_id"], "npc-1")
 
     def test_only_supported_unreasonable_reasons_reject_actions(self) -> None:
         classify = self.module.AIInteractiveFictionPlugin._route_action_is_reasonable

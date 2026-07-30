@@ -8,8 +8,8 @@ from typing import Any
 from .config import DEFAULT_CONTENT_LIMIT, StoryConfig, WordLimits
 from .llm import parse_json_object
 from .memory import MemoryService
-from .models import RoomMember, StoryRoom
-from .prompts import action_task, join_character_task, story_creation_task
+from .models import RoomMember, StoryRoom, initial_character_stats
+from .prompts import action_task, join_character_task, lust_event_task, story_creation_task
 from .roundtable import RoundtableGenerationError, RoundtableOutput
 from .story_generator import (
     PreparedStoryGeneration,
@@ -50,6 +50,13 @@ class ActionResult:
     changed_characters: list[dict[str, Any]]
     cg_trigger: str
     cg_character_id: str
+    discussion: list[dict[str, str]]
+
+
+@dataclass(slots=True)
+class AutonomousEventResult:
+    narrative: str
+    state_summary: str
     discussion: list[dict[str, str]]
 
 
@@ -114,7 +121,12 @@ class GameService:
                 action_restriction=50,
                 multiplayer=True,
             )
-        full_character = {"public": public, "private": private if isinstance(private, dict) else {}}
+        stats = parsed.get("player_stats") if isinstance(parsed.get("player_stats"), dict) else {}
+        full_character = {
+            "public": public,
+            "private": private if isinstance(private, dict) else {},
+            "stats": {"lust": _safe_int(stats.get("lust"), 0, 0, 100)},
+        }
         return BuiltStory(
             story=story,
             bible=bible,
@@ -160,9 +172,14 @@ class GameService:
             raise RoundtableGenerationError("生成失败，请配置或检查模型")
         public = dict(parsed["public_player_profile"])
         private = parsed.get("private_player_profile")
+        stats = parsed.get("character_stats") if isinstance(parsed.get("character_stats"), dict) else {}
         return BuiltCharacter(
             public_profile=public,
-            full_character={"public": public, "private": private if isinstance(private, dict) else {}},
+            full_character={
+                "public": public,
+                "private": private if isinstance(private, dict) else {},
+                "stats": {"lust": _safe_int(stats.get("lust"), 0, 0, 100)},
+            },
             discussion=output.discussion,
         )
 
@@ -177,7 +194,14 @@ class GameService:
         include_psychology: bool = False,
         trigger_types: set[str] | None = None,
         prepared: PreparedStoryGeneration | None = None,
+        forced_success: bool = False,
     ) -> ActionResult:
+        if (
+            prepared is not None
+            and content_type == "non_safe"
+            and prepared.request.content_type != "non_safe"
+        ):
+            prepared = None
         if prepared is None:
             prepared = await self.prepare_action(
                 room,
@@ -186,6 +210,7 @@ class GameService:
                 content_type=content_type,
                 forbid_player_autonomy=forbid_player_autonomy,
                 include_psychology=include_psychology,
+                forced_success=forced_success,
             )
         output = await self.generator.complete(
             prepared,
@@ -197,6 +222,47 @@ class GameService:
             result.psychology = ""
         return result
 
+    async def generate_lust_event(
+        self,
+        room: StoryRoom,
+        *,
+        preceding_action: str,
+        preceding_result: str,
+        initiator_id: str,
+        initiator: dict[str, Any],
+        target_id: str,
+        target: dict[str, Any],
+    ) -> AutonomousEventResult:
+        story = StoryConfig.from_runtime_dict(room.story_config)
+        request = StoryGenerationRequest(
+            task=lust_event_task(
+                bible=room.bible,
+                world_state=room.world_state,
+                preceding_action=preceding_action,
+                preceding_result=preceding_result,
+                initiator_id=initiator_id,
+                initiator=initiator,
+                target_id=target_id,
+                target=target,
+                character_stats=room.character_stats,
+                max_chars=self.word_limits.non_safe_content_chars,
+            ),
+            content_type="non_safe",
+            temperature=story.temperature,
+            output_validator=_is_autonomous_event_payload,
+            repair_instruction="顶层必须是JSON对象并包含非空narrative和字符串state_summary。",
+        )
+        output = await self.generator.generate(request, trigger_types={"non_safe"})
+        parsed = parse_json_object(output.final_text) or {}
+        narrative = str(parsed.get("narrative") or "").strip()
+        if not narrative:
+            raise RoundtableGenerationError("生成失败，请配置或检查模型")
+        return AutonomousEventResult(
+            narrative=narrative,
+            state_summary=str(parsed.get("state_summary") or "").strip(),
+            discussion=output.discussion,
+        )
+
     async def prepare_action(
         self,
         room: StoryRoom,
@@ -206,12 +272,14 @@ class GameService:
         content_type: str = "auto",
         forbid_player_autonomy: bool,
         include_psychology: bool | None = None,
+        forced_success: bool = False,
     ) -> PreparedStoryGeneration:
         story = StoryConfig.from_runtime_dict(room.story_config)
         memory_context = await self.memory.context_for_action(room, story)
         characters = {
             "players": {user_id: member.character for user_id, member in room.members.items()},
             "known_npcs": room.known_characters,
+            "stats": room.character_stats,
         }
         request = StoryGenerationRequest(
             task=action_task(
@@ -227,6 +295,7 @@ class GameService:
                 current_choices=room.current_choices,
                 include_psychology=include_psychology,
                 word_limits=self.word_limits,
+                forced_success=forced_success,
             ),
             content_type=content_type,
             temperature=story.temperature,
@@ -300,6 +369,7 @@ class GameService:
             current_choices=list(built.opening_choices),
             latest_discussion=list(built.discussion),
             origins=[origin],
+            character_stats={owner_id: initial_character_stats(built.full_character)},
         )
 
 
@@ -324,6 +394,16 @@ def _is_story_payload(text: str) -> bool:
 def _is_join_character_payload(text: str) -> bool:
     parsed = parse_json_object(text)
     return bool(parsed and isinstance(parsed.get("public_player_profile"), dict))
+
+
+def _is_autonomous_event_payload(text: str) -> bool:
+    parsed = parse_json_object(text)
+    return bool(
+        parsed
+        and isinstance(parsed.get("narrative"), str)
+        and str(parsed.get("narrative") or "").strip()
+        and isinstance(parsed.get("state_summary", ""), str)
+    )
 
 
 def _is_action_payload(text: str) -> bool:

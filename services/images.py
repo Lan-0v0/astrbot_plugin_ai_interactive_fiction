@@ -200,7 +200,7 @@ class ImageService:
                 if generator.support_mode == mode:
                     candidates.append(generator)
                 continue
-            if mode == "edit" and non_safe and generator.content_type != "free":
+            if non_safe and generator.content_type != "free":
                 continue
             if mode == "generate" and generator.content_type not in {"regular", "free"}:
                 continue

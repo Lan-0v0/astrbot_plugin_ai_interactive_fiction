@@ -68,6 +68,11 @@ class SaveService:
             for character_id, portrait in restored.portraits.items()
             if character_id in valid_character_ids
         }
+        restored.character_stats = {
+            character_id: stats
+            for character_id, stats in restored.character_stats.items()
+            if character_id in valid_character_ids
+        }
         if restored.conversation_character_id not in valid_character_ids:
             restored.conversation_character_id = ""
         for member_id in removed:

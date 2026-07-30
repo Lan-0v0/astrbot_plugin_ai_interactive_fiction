@@ -252,6 +252,57 @@ class GlobalJudge:
         parsed = parse_json_object(output) or {}
         return "non_safe" if str(parsed.get("content_type")) == "non_safe" else "regular"
 
+    async def assess_health_damage(
+        self,
+        *,
+        action: str,
+        narrative: str,
+        characters: dict[str, Any],
+        character_stats: dict[str, dict[str, int]],
+    ) -> list[dict[str, Any]]:
+        prompt = (
+            "根据已经生成的客观行动结果，判断哪些角色实际受到身体伤害以及应扣除多少生命值。"
+            "只计算本轮明确发生的伤害；威胁、未命中、单纯接触、情绪变化或仅提到暴力不得扣血。"
+            "轻伤通常1~19，中伤20~39，重伤40~79，明确死亡或身体被彻底摧毁扣除其全部剩余生命值。"
+            "不得修改淫乱值，不续写故事。只输出JSON："
+            '{"damage":[{"character_id":"稳定ID","amount":20,"reason":"简短依据"}]}\n'
+            f"玩家行动：{action}\n"
+            f"已生成结果：{narrative}\n"
+            f"角色资料：{json.dumps(characters, ensure_ascii=False)}\n"
+            f"当前数值：{json.dumps(character_stats, ensure_ascii=False)}"
+        )
+        output = await self.llm.generate(
+            self.provider_id,
+            prompt,
+            system_prompt=self.persona or self.ROUTE_SYSTEM,
+        )
+        parsed = parse_json_object(output) or {}
+        raw_items = parsed.get("damage")
+        if not isinstance(raw_items, list):
+            return []
+        allowed_ids = set(character_stats)
+        result: list[dict[str, Any]] = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            character_id = str(item.get("character_id") or "").strip()
+            if character_id not in allowed_ids:
+                continue
+            try:
+                amount = min(100, max(0, int(item.get("amount") or 0)))
+            except (TypeError, ValueError):
+                continue
+            if amount <= 0:
+                continue
+            result.append(
+                {
+                    "character_id": character_id,
+                    "amount": amount,
+                    "reason": str(item.get("reason") or "").strip(),
+                }
+            )
+        return result
+
     async def check_join_requirements(
         self,
         requirements: str,

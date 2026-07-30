@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from services.config import (
     DEFAULT_CONTENT_LIMIT,
+    DEFAULT_GLOBAL_NON_SAFE_PERSONA,
     DEFAULT_GLOBAL_STORY_PERSONA,
     DEFAULT_GLOBAL_JUDGE_PERSONA,
     DEFAULT_NON_SAFE_ROUNDTABLE_PERSONA,
@@ -27,7 +28,7 @@ from services.game import GameService, _choice_list, _is_action_payload
 from services.images import ImageService, apply_art_style
 from services.llm import GlobalJudge, LLMService, parse_json_object
 from services.memory import MemoryService
-from services.models import RoomMember, StoryRoom
+from services.models import RoomMember, StoryRoom, initial_character_stats
 from services.prompts import action_task
 from services.roundtable import (
     RoundtableConfigurationError,
@@ -132,7 +133,8 @@ class ConfigTests(unittest.TestCase):
     def test_global_story_defaults_and_roundtable_triggers(self) -> None:
         cfg = PluginConfig({})
         self.assertEqual(cfg.global_story_persona, DEFAULT_GLOBAL_STORY_PERSONA)
-        self.assertEqual(cfg.roundtable_triggers, {"non_safe", "draft"})
+        self.assertEqual(cfg.global_non_safe_persona, DEFAULT_GLOBAL_NON_SAFE_PERSONA)
+        self.assertEqual(cfg.roundtable_triggers, {"draft"})
         custom = PluginConfig(
             {
                 "global_story_provider_id": "story-model",
@@ -242,10 +244,20 @@ class ConfigTests(unittest.TestCase):
         )
         self.assertEqual(schema["global_judge_persona"]["default"], DEFAULT_GLOBAL_JUDGE_PERSONA)
         self.assertEqual(schema["global_story_persona"]["default"], DEFAULT_GLOBAL_STORY_PERSONA)
-        self.assertEqual(schema["roundtable_triggers"]["default"], ["non_safe", "draft"])
+        self.assertEqual(
+            schema["global_non_safe_persona"]["default"],
+            DEFAULT_GLOBAL_NON_SAFE_PERSONA,
+        )
+        self.assertEqual(schema["roundtable_triggers"]["default"], ["draft"])
         self.assertEqual(
             list(schema)[list(schema).index("stories") + 1 : list(schema).index("roundtable_models")],
-            ["global_story_provider_id", "global_story_persona", "roundtable_triggers"],
+            [
+                "global_story_provider_id",
+                "global_story_persona",
+                "global_non_safe_provider_id",
+                "global_non_safe_persona",
+                "roundtable_triggers",
+            ],
         )
         self.assertEqual(
             schema["image_generation_triggers"]["default"],
@@ -285,6 +297,37 @@ class LockTests(unittest.TestCase):
         self.assertFalse(lock.try_begin("room"))
         lock.finish("room")
         self.assertTrue(lock.try_begin("room"))
+
+
+class CharacterStatsTests(unittest.TestCase):
+    def test_initial_stats_and_legacy_room_migration_are_clamped(self) -> None:
+        self.assertEqual(
+            initial_character_stats({"stats": {"lust": 140}}),
+            {"health": 100, "lust": 100},
+        )
+        room = StoryRoom.from_dict(
+            {
+                "room_id": "room",
+                "owner_id": "owner",
+                "story_config": {},
+                "bible": {},
+                "members": {
+                    "owner": {
+                        "user_id": "owner",
+                        "display_name": "玩家",
+                        "character": {"public": {"name": "玩家"}, "stats": {"lust": 35}},
+                        "joined_turn": 0,
+                        "last_origin": "origin",
+                    }
+                },
+                "known_characters": {"npc": {"name": "NPC", "lust": -5}},
+                "character_stats": {"owner": {"health": 180, "lust": 35}},
+            }
+        )
+        self.assertEqual(room.character_stats["owner"], {"health": 100, "lust": 35})
+        self.assertEqual(room.character_stats["npc"], {"health": 100, "lust": 0})
+        restored = StoryRoom.from_dict(room.to_dict())
+        self.assertEqual(restored.character_stats, room.character_stats)
 
 
 class SaveTests(unittest.TestCase):
@@ -429,7 +472,7 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ImageGenerationError, "图像输入"):
             merge_workflow(generator, [prompt_mapping], prompt="new", uploaded_image="input.png")
 
-    def test_image_candidates_route_non_safe_edits_to_free_or_comfyui(self) -> None:
+    def test_image_candidates_route_all_non_safe_images_to_free_or_comfyui(self) -> None:
         generators = [
             ImageGeneratorConfig("openai", "regular", True, 90, "p", {"content_type": "regular"}),
             ImageGeneratorConfig("openai", "free", True, 80, "p", {"content_type": "free"}),
@@ -438,6 +481,8 @@ class WorkflowTests(unittest.TestCase):
         service = ImageService(FakeLLM(), generators, [], default_timeout=300, logger=Logger())
         names = [item.name for item in service._candidates(mode="edit", non_safe=True)]
         self.assertEqual(names, ["free", "local"])
+        generate_names = [item.name for item in service._candidates(mode="generate", non_safe=True)]
+        self.assertEqual(generate_names, ["free"])
 
     def test_art_style_prefix_is_normalized(self) -> None:
         self.assertEqual(apply_art_style("一个穿着JK制服的女生", "日系二次元"), "日系二次元画风，一个穿着JK制服的女生")
@@ -565,6 +610,8 @@ class StoryGeneratorTests(unittest.IsolatedAsyncioTestCase):
             roundtable,
             provider_id="story",
             persona="persona",
+            non_safe_provider_id="non-safe-story",
+            non_safe_persona="non-safe-persona",
             roundtable_triggers={"non_safe"},
             logger=Logger(),
         )
@@ -573,8 +620,12 @@ class StoryGeneratorTests(unittest.IsolatedAsyncioTestCase):
             trigger_types={"non_safe", "normal_action"},
         )
         self.assertEqual(output.final_text, "roundtable-final")
-        self.assertEqual(roundtable.run.await_args.kwargs["initial_draft"], "output-story")
+        self.assertEqual(
+            roundtable.run.await_args.kwargs["initial_draft"],
+            "output-non-safe-story",
+        )
         self.assertEqual(roundtable.run.await_args.kwargs["content_type"], "non_safe")
+        self.assertEqual(llm.system_prompts[0], "non-safe-persona")
 
     async def test_missing_global_story_provider_falls_back_to_roundtable(self) -> None:
         roundtable = unittest.mock.AsyncMock()
@@ -593,6 +644,28 @@ class StoryGeneratorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(output.final_text, "fallback")
         self.assertEqual(roundtable.run.await_args.kwargs["initial_draft"], "")
+
+    async def test_non_safe_direct_generation_uses_dedicated_provider_and_persona(self) -> None:
+        llm = FakeLLM()
+        roundtable = unittest.mock.AsyncMock()
+        service = StoryGeneratorService(
+            llm,
+            roundtable,
+            provider_id="regular-story",
+            persona="regular-persona",
+            non_safe_provider_id="non-safe-story",
+            non_safe_persona="non-safe-persona",
+            roundtable_triggers={"draft"},
+            logger=Logger(),
+        )
+        output = await service.generate(
+            StoryGenerationRequest("task", content_type="non_safe"),
+            trigger_types={"non_safe"},
+        )
+        self.assertEqual(output.final_text, "output-non-safe-story")
+        self.assertEqual(llm.calls, ["non-safe-story"])
+        self.assertEqual(llm.system_prompts, ["non-safe-persona"])
+        roundtable.run.assert_not_awaited()
 
 
 class JudgeTests(unittest.IsolatedAsyncioTestCase):
@@ -642,6 +715,36 @@ class JudgeTests(unittest.IsolatedAsyncioTestCase):
             [{"type": "scene_change", "character_id": "", "description": "进入大厅"}],
         )
         self.assertIn("场景变换", llm.prompts[0])
+
+    async def test_health_damage_parser_filters_unknown_ids_and_clamps_amounts(self) -> None:
+        class DamageLLM(FakeLLM):
+            async def generate(self, provider_id: str, prompt: str, **kwargs) -> str:
+                self.prompts.append(prompt)
+                return json.dumps(
+                    {
+                        "damage": [
+                            {"character_id": "npc", "amount": 140, "reason": "重伤"},
+                            {"character_id": "unknown", "amount": 20, "reason": "忽略"},
+                            {"character_id": "owner", "amount": -2, "reason": "忽略"},
+                        ]
+                    },
+                    ensure_ascii=False,
+                )
+
+        judge = GlobalJudge(DamageLLM(), "judge", "persona")
+        damage = await judge.assess_health_damage(
+            action="攻击",
+            narrative="NPC受到重伤",
+            characters={"owner": {}, "npc": {}},
+            character_stats={
+                "owner": {"health": 100, "lust": 0},
+                "npc": {"health": 100, "lust": 0},
+            },
+        )
+        self.assertEqual(
+            damage,
+            [{"character_id": "npc", "amount": 100, "reason": "重伤"}],
+        )
 
     def test_route_prompt_defines_roundtable_action_classification(self) -> None:
         self.assertIn('"action_level":"normal|high_risk_complex"', GlobalJudge.ROUTE_SYSTEM)
@@ -993,6 +1096,25 @@ class PromptTests(unittest.TestCase):
         self.assertIn("非安全内容：具体行动＋与对方的过程＋结果", non_safe)
         self.assertIn("不超过240字", non_safe)
         self.assertIn("不超过42字", non_safe)
+
+    def test_fixed_npc_option_prompt_requires_success_and_story_justification(self) -> None:
+        prompt = action_task(
+            story=StoryConfig(story_id="s", name="n", enabled=True),
+            bible={},
+            world_state="",
+            memory_context="",
+            characters={},
+            actor_id="u",
+            action="杀害正在交谈的角色（ID：npc-1）",
+            content_type="non_safe",
+            forbid_player_autonomy=True,
+            current_choices=[],
+            include_psychology=False,
+            forced_success=True,
+        )
+        self.assertIn("必须100%成功", prompt)
+        self.assertIn("自行补全可信且连贯的成功原因、具体过程与结果", prompt)
+        self.assertIn("不属于玩家自述结果", prompt)
 
     def test_action_result_keeps_choices_and_string_booleans(self) -> None:
         output = RoundtableOutput(

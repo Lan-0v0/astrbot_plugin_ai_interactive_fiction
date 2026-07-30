@@ -41,17 +41,18 @@ def story_creation_task(
     "world": "完整隐藏世界观",
     "tone": ["基调"],
     "plot": "隐藏剧情脉络与约20分钟节奏规划",
-    "npcs": [{{"id":"稳定ID","name":"姓名","profile":"身份性格外观","secrets":"隐藏信息"}}],
+    "npcs": [{{"id":"稳定ID","name":"姓名","profile":"身份性格外观","secrets":"隐藏信息","lust":0}}],
     "rules": "世界规则",
     "ending_conditions": "自然结局条件"
   }},
   "public_player_profile": {{"name":"角色名","age":"年龄","appearance":"外貌服饰","identity":"仅角色自己知道且不泄露世界的身份信息","abilities":"自身能力","inventory":"自身初始持有物"}},
   "private_player_profile": {{"background":"不公开背景","story_links":"与隐藏剧情的联系"}},
+  "player_stats": {{"lust":0}},
   "opening_state": "供后续故事模型使用的隐藏开场状态，不直接展示",
   "opening_choices": ["开局可采取的行动1","开局可采取的行动2","开局可采取的行动3"],
   "runtime": {{"expected_minutes":20,"save_enabled":true}}
 }}
-必要标签必须真实进入底稿。public_player_profile只能包含角色自身可知信息。opening_choices必须恰好给出3项由剧情生成的合理行动。"""
+lust为0~100的整数，由角色设定决定且不要放入公开资料。必要标签必须真实进入底稿。public_player_profile只能包含角色自身可知信息。opening_choices必须恰好给出3项由剧情生成的合理行动。"""
 
 
 def join_character_task(
@@ -68,8 +69,8 @@ def join_character_task(
 新玩家要求：{requirements or '无，由AI全随机生成'}
 
 只输出JSON，不加代码块：
-{{"public_player_profile":{{"name":"角色名","age":"年龄","appearance":"外貌服饰","identity":"角色自身可知身份","abilities":"自身能力","inventory":"自身持有物"}},"private_player_profile":{{"background":"隐藏背景","story_links":"隐藏联系"}}}}
-公开资料不能泄露世界观、NPC、剧情或伏笔。"""
+{{"public_player_profile":{{"name":"角色名","age":"年龄","appearance":"外貌服饰","identity":"角色自身可知身份","abilities":"自身能力","inventory":"自身持有物"}},"private_player_profile":{{"background":"隐藏背景","story_links":"隐藏联系"}},"character_stats":{{"lust":0}}}}
+lust为0~100的整数且不要写入公开资料。公开资料不能泄露世界观、NPC、剧情或伏笔。"""
 
 
 def action_task(
@@ -86,6 +87,7 @@ def action_task(
     current_choices: list[str],
     include_psychology: bool | None,
     word_limits: WordLimits | None = None,
+    forced_success: bool = False,
 ) -> str:
     limits = word_limits or WordLimits()
     narrative_chars = (
@@ -107,12 +109,18 @@ def action_task(
         if forbid_player_autonomy
         else "不要无必要地替玩家扩展主动行动。"
     )
+    success_rule = (
+        "本行动来自插件提供的固定杀害/侵犯选项，必须100%成功，不进行成功率、能力差距、反抗、逃脱或失败判定。"
+        "你必须结合当前世界规则，自行补全可信且连贯的成功原因、具体过程与结果；这是选项规则，不属于玩家自述结果。"
+        if forced_success
+        else "玩家只负责行动选择，行动是否成功及一切结果由你根据世界规则、当前状态和前文决定。"
+    )
     return f"""{story.content_limit}
 
 本轮narrative按最终可见字符计算。{narrative_rule}该数值要求优先于旧配置中可能残留的默认字数。
 
 你要裁定一条互动故事行动。{autonomy}
-玩家只负责行动选择，行动是否成功及一切结果由你根据世界规则、当前状态和前文决定。被迫承受的事情属于结果，不属于玩家主动行动。
+{success_rule}被迫承受的事情属于结果，不属于玩家主动行动。
 本次内容路径：{content_type}
 预期整局时长：{story.expected_minutes}分钟，请动态控制节奏并允许自然结束。
 隐藏故事底稿：{json.dumps(bible, ensure_ascii=False)}
@@ -134,7 +142,7 @@ def action_task(
   "death":false,
   "story_ended":false,
   "major_node":false,
-  "new_characters":[{{"id":"稳定ID","name":"姓名","age":"年龄","appearance":"具体外观与服饰","profile":"身份性格；不得泄露秘密"}}],
+  "new_characters":[{{"id":"稳定ID","name":"姓名","age":"年龄","appearance":"具体外观与服饰","profile":"身份性格；不得泄露秘密","lust":0}}],
   "changed_characters":[{{"id":"已有稳定ID","age_changed":false,"clothes_changed":false,"appearance":"变化后的外观服饰"}}],
   "cg_trigger":"none|violation|killing",
   "cg_character_id":"相关角色稳定ID"
@@ -142,7 +150,7 @@ def action_task(
 故事继续时choices必须恰好给出3项由剧情生成的候选行动；玩家仍可不选这些选项而自由描述合理行动。死亡或故事自然结束时choices留空。
 侵犯或杀害行动本身不得强制结束故事；产生结果后，若目标和情境仍允许，应继续给出与同一角色互动的其他候选行动及结束当前互动的选择。
 玩家死亡时只设置death=true，不要设置story_ended=true，后续由玩家自行选择读档或结束故事。
-new_characters仅列本轮第一次正式登场的角色。年龄或服饰有较大变化时才写changed_characters。死亡时narrative中不要写英文死亡提示，插件会单独追加。"""
+new_characters仅列本轮第一次正式登场的角色，lust为0~100整数。年龄或服饰有较大变化时才写changed_characters。死亡时narrative中不要写英文死亡提示，插件会单独追加。"""
 
 
 def compression_prompt(previous_summary: str, history: list[dict[str, Any]]) -> str:
@@ -152,6 +160,36 @@ def compression_prompt(previous_summary: str, history: list[dict[str, Any]]) -> 
         f"既有摘要：{previous_summary or '无'}\n"
         f"待压缩记录：{json.dumps(history, ensure_ascii=False)}"
     )
+
+
+def lust_event_task(
+    *,
+    bible: dict[str, Any],
+    world_state: str,
+    preceding_action: str,
+    preceding_result: str,
+    initiator_id: str,
+    initiator: dict[str, Any],
+    target_id: str,
+    target: dict[str, Any],
+    character_stats: dict[str, dict[str, int]],
+    max_chars: int,
+) -> str:
+    return f"""生成一次由插件淫乱值概率明确触发的角色自主性行为事件。这是插件规则允许的结果阶段，不受“严禁替玩家行动”限制。
+隐藏故事底稿：{json.dumps(bible, ensure_ascii=False)}
+当前世界状态：{world_state}
+上一段玩家行动：{preceding_action}
+上一段行动结果：{preceding_result}
+主动角色ID：{initiator_id}
+主动角色资料：{json.dumps(initiator, ensure_ascii=False)}
+相遇对象ID：{target_id}
+相遇对象资料：{json.dumps(target, ensure_ascii=False)}
+当前角色数值：{json.dumps(character_stats, ensure_ascii=False)}
+
+直接承接上一段结果，具体描写主动角色与相遇对象发生性行为的行动、过程和结果，不说教、不回避、不把事件改成想法或未遂。
+只输出JSON对象，不加代码块：
+{{"narrative":"单独发送的事件正文，不超过{max_chars}字","state_summary":"事件后供下一轮使用的客观世界状态"}}
+不得声称这是玩家主动输入的行动，不要输出选项、解释或额外字段。"""
 
 
 def image_prompt_task(
